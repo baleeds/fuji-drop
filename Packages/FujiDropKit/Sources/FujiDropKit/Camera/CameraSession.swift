@@ -95,6 +95,19 @@ public final class CameraSession: NSObject, ObservableObject {
         log.append(LogLine(text: text))
     }
 
+    /// Clears the stored control-authorization decision, then asks again.
+    public func resetControlAuthorization() async {
+        let reset = await withCheckedContinuation { cont in
+            browser.resetControlAuthorization { cont.resume(returning: $0) }
+        }
+        record("Control authorization after reset: \(reset.rawValue)")
+        let requested = await withCheckedContinuation { cont in
+            browser.requestControlAuthorization { cont.resume(returning: $0) }
+        }
+        controlAuthorization = requested.rawValue
+        record("Control authorization after re-request: \(requested.rawValue)")
+    }
+
     // MARK: File operations
 
     /// Thumbnail as the camera/ImageCaptureCore provides it by default (no size option),
@@ -133,6 +146,32 @@ public final class CameraSession: NSObject, ObservableObject {
         return directory.appendingPathComponent(filename)
     }
 
+    /// Reads a byte range of a file on the camera without downloading the whole file.
+    public func readData(_ file: ICCameraFile, offset: Int, length: Int) async throws -> Data {
+        try await Self.withTimeout(30, "partial read") { done in
+            file.requestReadData(atOffset: off_t(offset), length: off_t(length)) { data, error in
+                if let data { done(.success(data)) }
+                else { done(.failure(error ?? CameraError.empty("data"))) }
+            }
+        }
+    }
+
+    public struct EmbeddedPreview: Sendable {
+        public var header: RAFHeader
+        public var jpeg: Data
+    }
+
+    /// Fetches the JPEG preview embedded in a RAF with two partial reads:
+    /// the header, then exactly the preview's byte range.
+    public func embeddedPreview(of raf: ICCameraFile) async throws -> EmbeddedPreview {
+        let head = try await readData(raf, offset: 0, length: RAFHeader.readLength)
+        guard let header = RAFHeader(head) else {
+            throw CameraError.notRAF(PTP.hex(head, limit: 16))
+        }
+        let jpeg = try await readData(raf, offset: header.jpegOffset, length: header.jpegLength)
+        return EmbeddedPreview(header: header, jpeg: jpeg)
+    }
+
     // MARK: PTP pass-through
 
     public struct PTPResult: Sendable {
@@ -159,20 +198,41 @@ public final class CameraSession: NSObject, ObservableObject {
         let txID = nextTransactionID
         nextTransactionID &+= 1
         let command = PTP.commandContainer(operation, transactionID: txID, params: params)
-        return await withCheckedContinuation { cont in
-            camera.requestSendPTPCommand(command, outData: outData) { first, second, error in
+        do {
+            return try await Self.withTimeout(15, "PTP command") { done in
+                camera.requestSendPTPCommand(command, outData: outData) { first, second, error in
                 // The header names these (responseData, ptpResponseData); detect which one is the
                 // response container rather than trusting the order.
                 let swapped = PTP.parseResponse(second) == nil && PTP.parseResponse(first) != nil
                 let dataIn = swapped ? second : first
-                let responseData = swapped ? first : second
-                cont.resume(returning: PTPResult(
-                    command: command,
-                    dataIn: dataIn,
-                    responseData: responseData,
-                    response: PTP.parseResponse(responseData),
-                    errorDescription: error.map { CameraSession.describe($0) }
-                ))
+                    let responseData = swapped ? first : second
+                    done(.success(PTPResult(
+                        command: command,
+                        dataIn: dataIn,
+                        responseData: responseData,
+                        response: PTP.parseResponse(responseData),
+                        errorDescription: error.map { CameraSession.describe($0) }
+                    )))
+                }
+            }
+        } catch {
+            return PTPResult(command: command, dataIn: Data(), responseData: Data(),
+                             response: nil, errorDescription: error.localizedDescription)
+        }
+    }
+
+    /// Bridges a callback API to async, failing with `.timeout` if the callback never fires.
+    /// Whichever comes first wins; the other is ignored.
+    nonisolated static func withTimeout<T: Sendable>(
+        _ seconds: Double,
+        _ what: String,
+        _ start: (@escaping @Sendable (Result<T, Error>) -> Void) -> Void
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { cont in
+            let once = ResumeOnce(cont)
+            start { once.resume($0) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+                once.resume(.failure(CameraError.timeout(what, seconds)))
             }
         }
     }
@@ -184,9 +244,13 @@ public final class CameraSession: NSObject, ObservableObject {
 
     public enum CameraError: LocalizedError {
         case empty(String)
+        case notRAF(String)
+        case timeout(String, Double)
         public var errorDescription: String? {
             switch self {
+            case .timeout(let what, let secs): return "No answer to \(what) after \(Int(secs)) s"
             case .empty(let what): return "Camera returned no \(what) and no error"
+            case .notRAF(let head): return "Not a RAF header: \(head)"
             }
         }
     }
@@ -240,6 +304,22 @@ public final class CameraSession: NSObject, ObservableObject {
         if files.isEmpty {
             record("Empty file list. Known iOS issue with some bodies; check camera USB mode and card.")
         }
+    }
+}
+
+/// Resumes a continuation exactly once, from whichever thread gets there first.
+private final class ResumeOnce<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+
+    init(_ continuation: CheckedContinuation<T, Error>) { self.continuation = continuation }
+
+    func resume(_ result: Result<T, Error>) {
+        lock.lock()
+        let c = continuation
+        continuation = nil
+        lock.unlock()
+        c?.resume(with: result)
     }
 }
 

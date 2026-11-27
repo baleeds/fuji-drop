@@ -63,6 +63,9 @@ private struct SpikeContent: View {
             LabeledContent("Status", value: phaseText)
             LabeledContent("Contents access", value: camera.contentsAuthorization)
             LabeledContent("Control access", value: camera.controlAuthorization)
+            if camera.phase != .idle {
+                Button("Reset control access and ask again") { Task { await camera.resetControlAuthorization() } }
+            }
             if camera.catalogComplete {
                 LabeledContent("Files / shots / pairs",
                                value: "\(camera.files.count) / \(camera.shots.count) / \(camera.shots.filter(\.isComplete).count)")
@@ -104,8 +107,25 @@ private struct SpikeContent: View {
             if let jpeg = model.downloadedJPEG {
                 Button("View \(jpeg.source) at 100% (\(jpeg.sizeText), \(jpeg.millis) ms)") { zoomed = jpeg }
             }
+            Button("Read embedded preview from last 5 RAFs") { Task { await model.testRAFPreviews() } }
+                .disabled(!camera.catalogComplete)
+            if !model.rafPreviews.isEmpty {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 8) {
+                        ForEach(model.rafPreviews) { thumb in
+                            ThumbCell(thumb: thumb, selected: model.selected == thumb.basename)
+                                .onTapGesture { model.selected = thumb.basename }
+                                .onLongPressGesture { zoomed = thumb }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(height: 130)
+            }
         } header: {
-            Text("2. Thumbnail size")
+            Text("2. Preview size")
+        } footer: {
+            Text("The embedded preview is read straight out of the RAF without downloading the whole file. Long-press any image to view it at 100%.")
         }
     }
 

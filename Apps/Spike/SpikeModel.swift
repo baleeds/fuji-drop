@@ -145,6 +145,53 @@ final class SpikeModel: ObservableObject {
         }
     }
 
+    // MARK: 2b. Embedded RAF preview (partial reads)
+
+    @Published var rafPreviews: [Thumb] = []
+
+    /// Reads only the JPEG preview embedded in each of the last few RAFs, using two partial
+    /// reads per file, and reports its size and speed against downloading the whole RAF.
+    func testRAFPreviews(count: Int = 5) async {
+        let rafs = camera.shots.compactMap { shot in shot.raw.map { (shot.basename, $0) } }.suffix(count)
+        guard !rafs.isEmpty else { return set(2, .fail, "No RAF files on the card.") }
+        busy = true; defer { busy = false }
+        let thumbNote = checks.first { $0.id == 2 }.map { $0.detail.isEmpty ? "" : "Thumbnails: \($0.detail) " } ?? ""
+        set(2, .running, "Reading embedded previews from \(rafs.count) RAFs…")
+        rafPreviews = []
+        for (basename, raf) in rafs {
+            let start = Date()
+            do {
+                let preview = try await camera.embeddedPreview(of: raf)
+                let ms = Int(Date().timeIntervalSince(start) * 1000)
+                let (image, size) = Self.decode(preview.jpeg)
+                rafPreviews.append(Thumb(basename: basename, source: "\(raf.name ?? basename) preview", image: image,
+                                         pixelSize: size, bytes: preview.jpeg.count, millis: ms, error: nil))
+                camera.record("""
+                RAF preview \(raf.name ?? basename): model \(preview.header.cameraModel), \
+                offset \(preview.header.jpegOffset), \(preview.jpeg.count / 1024) KB of \(Int(raf.fileSize) / 1_048_576) MB RAF, \
+                \(Int(size.width))×\(Int(size.height)), \(ms) ms
+                """)
+            } catch {
+                rafPreviews.append(Thumb(basename: basename, source: raf.name ?? basename, image: nil,
+                                         pixelSize: .zero, bytes: 0, millis: 0, error: error.localizedDescription))
+                camera.record("RAF preview \(raf.name ?? basename) failed: \(error.localizedDescription)")
+            }
+        }
+        if selected == nil { selected = rafPreviews.last?.basename }
+
+        let ok = rafPreviews.filter { $0.error == nil }
+        guard !ok.isEmpty else {
+            return set(2, .fail, "\(thumbNote)RAF partial reads failed: \(rafPreviews.first?.error ?? "unknown"). Fallback: download whole RAFs.")
+        }
+        let sizes = Set(ok.map(\.sizeText)).sorted().joined(separator: ", ")
+        let avgMs = ok.map(\.millis).reduce(0, +) / ok.count
+        let avgKB = ok.map(\.bytes).reduce(0, +) / ok.count / 1024
+        let longEdge = ok.map { max($0.pixelSize.width, $0.pixelSize.height) }.max() ?? 0
+        let perMinute = avgMs > 0 ? 60_000 / avgMs : 0
+        set(2, longEdge >= 1024 ? .pass : .info,
+            "\(thumbNote)RAF embedded preview: \(ok.count)/\(rafPreviews.count) read, \(sizes), avg \(avgKB) KB in \(avgMs) ms (~\(perMinute) shots/min). Long-press one to judge focus at 100%.")
+    }
+
     // MARK: 3. Save pair to Photos
 
     var selectedShot: ShotPair<ICCameraFile>? {
@@ -242,7 +289,7 @@ final class SpikeModel: ObservableObject {
 
     private func isNotAuthorized(_ text: String) -> Bool {
         let t = text.lowercased()
-        return t.contains("not authorized") || t.contains("notauthorized") || t.contains("not permitted")
+        return t.contains("not authorized") || t.contains("notauthorized") || t.contains("not permitted") || t.contains("no answer")
     }
 
     private func logPTP(_ label: String, _ r: CameraSession.PTPResult) {
