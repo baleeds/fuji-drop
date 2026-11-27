@@ -8,6 +8,13 @@ import UIKit
 /// Winner stays: the first pane is the current favourite, the second is the challenger.
 /// Tap a frame in the filmstrip to challenge with it; "Pick this" on the challenger swaps it
 /// in as the favourite. "Pick" saves the favourite as the moment's pick.
+/// The pair compare opens with, chosen once by `ImportModel.compareStart`.
+struct CompareStart: Identifiable {
+    let favourite: String
+    let challenger: String
+    var id: String { favourite + "|" + challenger }
+}
+
 struct CompareView: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
@@ -16,25 +23,24 @@ struct CompareView: View {
     @State private var challenger: String
     @State private var group = ZoomGroup()
 
-    init(model: ImportModel, ids: [String]) {
+    init(model: ImportModel, ids: [String], start: CompareStart) {
         self.model = model
         self.ids = ids
-        let start = model.compareStart(in: ids)
-        _favourite = State(initialValue: start.top)
-        _challenger = State(initialValue: start.bottom)
+        _favourite = State(initialValue: start.favourite)
+        _challenger = State(initialValue: start.challenger)
     }
 
     var body: some View {
         let sideBySide = model.aspect(favourite, clamped: false) < 1
         let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 2)) : AnyLayout(VStackLayout(spacing: 2))
-        let flaws = model.flaws(in: ids)
+        let breakdowns = model.ranking(of: ids)?.breakdowns
         NavigationStack {
             VStack(spacing: 0) {
                 layout {
-                    ComparePane(model: model, shot: model.shots[favourite], flaws: flaws[favourite] ?? [], group: group,
-                                isFavourite: true, promote: {})
-                    ComparePane(model: model, shot: model.shots[challenger], flaws: flaws[challenger] ?? [], group: group,
-                                isFavourite: false) {
+                    ComparePane(model: model, shot: model.shots[favourite],
+                                flaws: breakdowns?[favourite]?.flaws ?? [], group: group, promote: nil)
+                    ComparePane(model: model, shot: model.shots[challenger],
+                                flaws: breakdowns?[challenger]?.flaws ?? [], group: group) {
                         let previous = favourite
                         favourite = challenger
                         challenger = previous
@@ -69,42 +75,6 @@ struct CompareView: View {
     }
 }
 
-/// Full-resolution decodes of downloaded RAFs. Only a couple are kept: each is ~64 MB.
-@MainActor
-final class FullResolutionLoader {
-    static let shared = FullResolutionLoader()
-
-    private let cache = NSCache<NSString, UIImage>()
-    private var running: [URL: Task<UIImage?, Never>] = [:]
-
-    private init() {
-        cache.totalCostLimit = 200_000_000
-    }
-
-    /// An already decoded image, without waiting.
-    func cached(_ url: URL) -> UIImage? {
-        cache.object(forKey: url.lastPathComponent as NSString)
-    }
-
-    func image(for url: URL) async -> UIImage? {
-        let key = url.lastPathComponent as NSString
-        if let hit = cache.object(forKey: key) { return hit }
-        if let task = running[url] { return await task.value }
-        let task = Task { () -> UIImage? in
-            await Background.raw {
-                (try? RAWRenderer.renderImage(from: url)).map { UIImage(cgImage: $0) }
-            }
-        }
-        running[url] = task
-        let image = await task.value
-        running[url] = nil
-        if let image {
-            cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4))
-        }
-        return image
-    }
-}
-
 /// One side of the comparison, zoomable with the other side: the 1920 px preview at once,
 /// then the full-resolution RAF once it has downloaded and decoded (a few seconds).
 private struct ComparePane: View {
@@ -112,8 +82,8 @@ private struct ComparePane: View {
     let shot: ImportModel.Shot?
     let flaws: [BestShot.Flaw]
     let group: ZoomGroup
-    let isFavourite: Bool
-    let promote: () -> Void
+    /// Swaps this pane in as the favourite; nil for the favourite itself.
+    let promote: (() -> Void)?
     @State private var image: UIImage?
     @State private var full: FullState = .loading
 
@@ -133,21 +103,13 @@ private struct ComparePane: View {
         }
         .clipped()
         .overlay(alignment: .topLeading) {
-            if isFavourite {
-                Label("Favourite", systemImage: "star.fill")
-                    .labelStyle(.iconOnly)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.yellow)
-                    .padding(7)
-                    .background(.black.opacity(0.45), in: Circle())
-                    .padding(10)
-            }
+            if promote == nil { SuggestedBadge(label: "Favourite") }
         }
-        .overlay(alignment: isFavourite ? .topTrailing : .topLeading) {
+        .overlay(alignment: promote == nil ? .topTrailing : .topLeading) {
             FlawTip(flaws: flaws)
         }
         .overlay(alignment: .bottomTrailing) {
-            if !isFavourite {
+            if let promote {
                 Button(action: promote) {
                     Label("Pick this", systemImage: "arrow.up.arrow.down")
                         .font(.subheadline.weight(.semibold))
@@ -162,7 +124,7 @@ private struct ComparePane: View {
             // in-memory cache), so the zoomable view and its viewport carry over.
             guard let shot else { image = nil; return }
             // Already decoded (e.g. after swapping panes): show it straight away.
-            if let raw = model.cachedRawURL(shot.id), let decoded = FullResolutionLoader.shared.cached(raw) {
+            if let raw = model.cachedRawURL(shot.id), let decoded = PreviewImageLoader.shared.cachedFullResolution(raw: raw) {
                 image = decoded
                 full = .ready
                 return
@@ -179,7 +141,7 @@ private struct ComparePane: View {
                 if !Task.isCancelled { full = .failed }
                 return
             }
-            let fullImage = await FullResolutionLoader.shared.image(for: raw)
+            let fullImage = await PreviewImageLoader.shared.loadFullResolution(raw: raw)
             guard !Task.isCancelled else { return }
             if let fullImage {
                 image = fullImage
@@ -212,10 +174,7 @@ private struct ComparePane: View {
         }
         .font(.caption2.weight(.bold))
         .foregroundStyle(full == .ready ? .white : .white.opacity(0.7))
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background(.black.opacity(0.5), in: Capsule())
-        .padding(10)
+        .photoCapsule()
         .accessibilityLabel(full == .ready ? "Full resolution" : full == .loading ? "Loading full resolution" : "Full resolution unavailable")
     }
 }

@@ -2,14 +2,15 @@ import FujiDropKit
 import SwiftUI
 import UIKit
 
-/// Decodes cached 1920 px previews at the size they're shown, with an in-memory cache.
+/// Decodes cached 1920 px previews at the size they're shown, and downloaded RAFs at full
+/// resolution (~64 MB each, for compare), with one in-memory cache.
 final class PreviewImageLoader: @unchecked Sendable {
     static let shared = PreviewImageLoader()
 
     private let cache = NSCache<NSString, UIImage>()
 
     private init() {
-        cache.totalCostLimit = 200_000_000 // bytes of decoded bitmaps
+        cache.totalCostLimit = 300_000_000 // bytes of decoded bitmaps
     }
 
     /// Round requested sizes up to a few buckets so scrolling reuses decoded images.
@@ -18,11 +19,32 @@ final class PreviewImageLoader: @unchecked Sendable {
     }
 
     func load(url: URL, maxPixelSize: Int) async -> UIImage? {
-        let key = "\(url.lastPathComponent)@\(maxPixelSize)" as NSString
-        if let hit = cache.object(forKey: key) { return hit }
-        let image = await Background.decode {
-            ImageLoading.thumbnail(at: url, maxPixelSize: maxPixelSize).map { UIImage(cgImage: $0) }
+        await load(key: "\(url.lastPathComponent)@\(maxPixelSize)" as NSString) {
+            await Background.decode {
+                ImageLoading.thumbnail(at: url, maxPixelSize: maxPixelSize).map { UIImage(cgImage: $0) }
+            }
         }
+    }
+
+    /// A RAF already decoded at full resolution, without waiting.
+    func cachedFullResolution(raw: URL) -> UIImage? {
+        cache.object(forKey: Self.fullKey(raw))
+    }
+
+    /// Decodes a downloaded RAF at full resolution (about 1.3 s).
+    func loadFullResolution(raw: URL) async -> UIImage? {
+        await load(key: Self.fullKey(raw)) {
+            await Background.raw {
+                (try? RAWRenderer.renderImage(from: raw)).map { UIImage(cgImage: $0) }
+            }
+        }
+    }
+
+    private static func fullKey(_ raw: URL) -> NSString { "\(raw.lastPathComponent)@full" as NSString }
+
+    private func load(key: NSString, decode: () async -> UIImage?) async -> UIImage? {
+        if let hit = cache.object(forKey: key) { return hit }
+        let image = await decode()
         if let image {
             cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4))
         }

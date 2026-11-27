@@ -35,7 +35,7 @@ public enum BestShot {
     }
 
     /// A likely reason a frame isn't the best, shown as a tip.
-    public enum Flaw: String, CaseIterable, Sendable {
+    public enum Flaw: Sendable {
         case softFocus
         case eyesClosed
         case faceUnclear
@@ -112,8 +112,12 @@ public enum BestShot {
     }
 
     /// Index of the suggested frame; ties go to the earlier frame.
-    public static func bestIndex(_ scores: [ShotScore], weights: Weights = Weights()) -> Int? {
-        let ranked = rank(scores, weights: weights)
+    public static func bestIndex(_ scores: [ShotScore]) -> Int? {
+        bestIndex(rank(scores))
+    }
+
+    /// Index of the highest total in already-ranked frames; ties go to the earlier frame.
+    public static func bestIndex(_ ranked: [Breakdown]) -> Int? {
         guard var best = ranked.indices.first else { return nil }
         for i in ranked.indices.dropFirst() where ranked[i].total > ranked[best].total { best = i }
         return best

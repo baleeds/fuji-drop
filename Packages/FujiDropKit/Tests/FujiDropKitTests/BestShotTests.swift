@@ -130,7 +130,7 @@ final class BestShotTests: XCTestCase {
     }
 
     func testEmpty() {
-        XCTAssertNil(BestShot.bestIndex([]))
+        XCTAssertNil(BestShot.bestIndex([ShotScore]()))
         XCTAssertEqual(BestShot.rank([]), [])
     }
 }

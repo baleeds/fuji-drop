@@ -78,11 +78,18 @@ struct PhotoLabel: View {
             }
         }
         .font(.caption.weight(.semibold).monospacedDigit())
-        .foregroundStyle(.white)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.black.opacity(0.45), in: Capsule())
-        .padding(10)
+        .photoCapsule()
+    }
+}
+
+extension View {
+    /// The dark capsule used for every label laid over a photo.
+    func photoCapsule() -> some View {
+        foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.black.opacity(0.5), in: Capsule())
+            .padding(10)
     }
 }
 
@@ -107,17 +114,15 @@ struct FlawTip: View {
         if !flaws.isEmpty {
             Label(flaws.map(\.title).joined(separator: " · "), systemImage: "exclamationmark.triangle.fill")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.black.opacity(0.55), in: Capsule())
-                .padding(10)
+                .photoCapsule()
         }
     }
 }
 
-/// Marks the suggested frame of a moment (until the owner picks one).
+/// Marks the suggested frame of a moment (until the owner picks one), or the favourite in compare.
 struct SuggestedBadge: View {
+    var label = "Suggested pick"
+
     var body: some View {
         Image(systemName: "star.fill")
             .font(.caption.weight(.semibold))
@@ -125,7 +130,7 @@ struct SuggestedBadge: View {
             .padding(7)
             .background(.black.opacity(0.45), in: Circle())
             .padding(10)
-            .accessibilityLabel("Suggested pick")
+            .accessibilityLabel(label)
     }
 }
 

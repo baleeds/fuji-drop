@@ -9,13 +9,12 @@ struct MomentDetailView: View {
     let ids: [String]
     @AppStorage("showGroupingDetails") private var showDetails = false
     @State private var viewing: String?
-    @State private var comparing = false
+    @State private var comparing: CompareStart?
 
     var body: some View {
+        let ranking = model.ranking(of: ids)
         let picked = model.picked(in: ids)
-        let suggested = picked == nil ? model.suggested(in: ids) : nil
-        let ranking = showDetails ? model.ranking(of: ids) : nil
-        let flaws = model.flaws(in: ids)
+        let suggested = picked == nil ? ranking?.suggested : nil
         ScrollView {
             LazyVStack(spacing: 3) {
                 ForEach(ids, id: \.self) { id in
@@ -23,7 +22,7 @@ struct MomentDetailView: View {
                         .aspectRatio(model.aspect(id, clamped: false), contentMode: .fit)
                         .frame(maxWidth: .infinity)
                         .overlay(alignment: .topLeading) {
-                            FlawTip(flaws: flaws[id] ?? [])
+                            FlawTip(flaws: ranking?.breakdowns[id]?.flaws ?? [])
                         }
                         .overlay(alignment: .topTrailing) {
                             if id == picked { PickedBadge() } else if id == suggested { SuggestedBadge() }
@@ -31,7 +30,7 @@ struct MomentDetailView: View {
                         .overlay(alignment: .bottomLeading) {
                             if showDetails {
                                 VStack(alignment: .leading, spacing: -14) {
-                                    if let r = ranking?[id] { PhotoLabel(title: scoreDetails(r)) }
+                                    if let r = ranking?.breakdowns[id] { PhotoLabel(title: scoreDetails(r)) }
                                     PhotoLabel(title: details(id))
                                 }
                             }
@@ -45,7 +44,7 @@ struct MomentDetailView: View {
                                 Button("Pick", systemImage: "checkmark") { model.setPick(id, in: ids) }
                             }
                             if ids.count > 1 {
-                                Button("Compare", systemImage: "square.split.1x2") { comparing = true }
+                                Button("Compare", systemImage: "square.split.1x2", action: compare)
                             }
                         }
                 }
@@ -55,15 +54,21 @@ struct MomentDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if ids.count > 1 {
-                Button("Compare", systemImage: "square.split.1x2") { comparing = true }
+                Button("Compare", systemImage: "square.split.1x2", action: compare)
             }
         }
-        .fullScreenCover(isPresented: $comparing) {
-            CompareView(model: model, ids: ids)
+        .fullScreenCover(item: $comparing) { start in
+            CompareView(model: model, ids: ids, start: start)
         }
         .sheet(item: Binding(get: { viewing.map { Viewing(id: $0) } }, set: { viewing = $0?.id })) { v in
             PreviewSheet(shot: model.shots[v.id])
         }
+    }
+
+    /// Chooses the opening pair once, when compare is opened.
+    private func compare() {
+        let start = model.compareStart(in: ids)
+        comparing = CompareStart(favourite: start.top, challenger: start.bottom)
     }
 
     private var title: String {
@@ -117,7 +122,8 @@ private struct PreviewSheet: View {
             .toolbar { Button("Done") { dismiss() } }
         }
         .task(id: shot?.previewURL) {
-            image = shot?.previewURL.flatMap { UIImage(contentsOfFile: $0.path) }
+            guard let url = shot?.previewURL else { image = nil; return }
+            image = await PreviewImageLoader.shared.load(url: url, maxPixelSize: 1920)
         }
     }
 }

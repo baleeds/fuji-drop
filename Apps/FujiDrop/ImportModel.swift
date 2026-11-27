@@ -42,11 +42,10 @@ final class ImportModel: ObservableObject {
     let camera = CameraSession()
     private let cache = PreviewCache()
     private let rawCache = RawCache()
-    /// In-flight RAF downloads by shot id, so two callers share one download.
+    /// In-flight RAF downloads by shot id, so two callers share one download. While any are
+    /// running the preview queue waits: the camera answers one request at a time and a RAF
+    /// someone is looking at matters more than background previews.
     private var rawDownloads: [String: Task<URL?, Never>] = [:]
-    /// While above zero, the preview queue waits: the camera answers one request at a time and
-    /// a RAF someone is looking at matters more than background previews.
-    private var activeRawDownloads = 0
 
     @Published private(set) var days: [Day] = []
     @Published private(set) var selectedDayID: String?
@@ -75,7 +74,7 @@ final class ImportModel: ObservableObject {
 
     init() {
         pruneCache()
-        rawCache.clear() // left over from a previous session
+        clearRawCache() // left over from a previous session
     }
 
     // MARK: Catalog → days
@@ -108,7 +107,7 @@ final class ImportModel: ObservableObject {
         workerGeneration += 1
         rawDownloads.values.forEach { $0.cancel() }
         rawDownloads = [:]
-        rawCache.clear()
+        clearRawCache()
         queue = []
         days = []; selectedDayID = nil; shots = [:]; order = []; moments = []
         previewStart = nil; distanceCache = [:]
@@ -182,7 +181,7 @@ final class ImportModel: ObservableObject {
         worker = Task { [weak self] in
             var loaded = 0
             while let self, !Task.isCancelled, let id = self.nextQueued() {
-                while self.activeRawDownloads > 0, !Task.isCancelled {
+                while !self.rawDownloads.isEmpty, !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 let started = Date()
@@ -296,19 +295,21 @@ final class ImportModel: ObservableObject {
 
     /// Downloads a shot's RAF (about 1.4 s for 33 MB), or returns the cached copy.
     func rawURL(_ id: String) async -> URL? {
+        if let cached = cachedRawURL(id) { return cached }
         guard let shot = shots[id] else { return nil }
-        let size = Int64(shot.raw.fileSize)
-        if let cached = rawCache.cachedURL(name: id, size: size) { return cached }
         if let running = rawDownloads[id] { return await running.value }
+        let size = Int64(shot.raw.fileSize)
+        let cache = rawCache
         let task = Task { [weak self] () -> URL? in
             guard let self else { return nil }
-            self.activeRawDownloads += 1
-            defer { self.activeRawDownloads -= 1 }
             let started = Date()
             do {
-                let downloaded = try await self.camera.download(shot.raw, to: self.rawCache.incoming)
-                let url = try self.rawCache.adopt(downloaded, name: id, size: size)
-                self.rawCache.prune()
+                let downloaded = try await self.camera.download(shot.raw, to: cache.incoming)
+                let url = try await Task.detached(priority: .userInitiated) {
+                    let url = try cache.adopt(downloaded, name: id, size: size)
+                    cache.prune()
+                    return url
+                }.value
                 self.camera.record(String(format: "RAF %@: %.1f MB in %.2f s", id,
                                           Double(size) / 1_000_000, Date().timeIntervalSince(started)))
                 return url
@@ -321,6 +322,11 @@ final class ImportModel: ObservableObject {
         let url = await task.value
         rawDownloads[id] = nil
         return url
+    }
+
+    private func clearRawCache() {
+        let cache = rawCache
+        Task.detached(priority: .utility) { cache.clear() }
     }
 
     // MARK: Preview cache
@@ -367,30 +373,27 @@ final class ImportModel: ObservableObject {
         return d
     }
 
-    /// Each frame's best-shot breakdown, once every frame of the moment is scored.
-    func ranking(of ids: [String]) -> [String: BestShot.Breakdown]? {
+    /// A moment's best-shot ranking: each frame's breakdown (score parts and flaws such as
+    /// "Soft focus") and the suggested frame (nil for single frames).
+    struct Ranking {
+        let breakdowns: [String: BestShot.Breakdown]
+        let suggested: String?
+    }
+
+    /// Ranks a moment once every frame is scored. Compute it once per render and read
+    /// everything from it.
+    func ranking(of ids: [String]) -> Ranking? {
         let scores = ids.compactMap { shots[$0]?.score }
         guard scores.count == ids.count, !ids.isEmpty else { return nil }
-        return Dictionary(uniqueKeysWithValues: zip(ids, BestShot.rank(scores)))
-    }
-
-    /// Likely reasons each frame isn't the best ("Soft focus", "Eyes closed"), once scored.
-    func flaws(in ids: [String]) -> [String: [BestShot.Flaw]] {
-        ranking(of: ids)?.mapValues(\.flaws) ?? [:]
-    }
-
-    /// The suggested frame, once every frame is scored. Nil for single frames.
-    func suggested(in ids: [String]) -> String? {
-        guard ids.count > 1 else { return nil }
-        let scores = ids.compactMap { shots[$0]?.score }
-        guard scores.count == ids.count, let i = BestShot.bestIndex(scores) else { return nil }
-        return ids[i]
+        let ranked = BestShot.rank(scores)
+        let best = ids.count > 1 ? BestShot.bestIndex(ranked).map { ids[$0] } : nil
+        return Ranking(breakdowns: Dictionary(uniqueKeysWithValues: zip(ids, ranked)), suggested: best)
     }
 
     /// The frame that stands for a moment: the owner's pick, else the suggestion, else the
     /// middle frame until all frames are scored (so the feed doesn't flicker).
-    func hero(of ids: [String]) -> String {
-        picked(in: ids) ?? suggested(in: ids) ?? ids[ids.count / 2]
+    func hero(of ids: [String], ranking: Ranking? = nil) -> String {
+        picked(in: ids) ?? (ranking ?? self.ranking(of: ids))?.suggested ?? ids[ids.count / 2]
     }
 
     // MARK: Picks
@@ -418,11 +421,12 @@ final class ImportModel: ObservableObject {
     /// The two frames compare opens with: the current favourite on top (pick, else suggestion,
     /// else middle) and the best-ranked other frame (else the next frame in time) below.
     func compareStart(in ids: [String]) -> (top: String, bottom: String) {
-        let top = hero(of: ids)
+        let ranking = ranking(of: ids)
+        let top = hero(of: ids, ranking: ranking)
         let others = ids.filter { $0 != top }
         guard !others.isEmpty else { return (top, top) }
-        if let ranking = ranking(of: ids),
-           let best = others.max(by: { (ranking[$0]?.total ?? 0) < (ranking[$1]?.total ?? 0) }) {
+        if let totals = ranking?.breakdowns.mapValues(\.total),
+           let best = others.max(by: { (totals[$0] ?? 0) < (totals[$1] ?? 0) }) {
             return (top, best)
         }
         let i = ids.firstIndex(of: top) ?? 0

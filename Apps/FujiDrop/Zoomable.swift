@@ -41,11 +41,7 @@ struct ZoomableImage: UIViewRepresentable {
     var maxZoom: CGFloat = 4
 
     func makeUIView(context: Context) -> ZoomingScrollView {
-        let view = ZoomingScrollView(image: image)
-        view.maximumZoomScale = maxZoom
-        view.group = group
-        group?.register(view)
-        return view
+        ZoomingScrollView(image: image, group: group, maxZoom: maxZoom)
     }
 
     func updateUIView(_ view: ZoomingScrollView, context: Context) { view.setImage(image) }
@@ -58,13 +54,14 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
     /// Set while applying a viewport from the group, so the change isn't echoed back.
     private var applying = false
 
-    init(image: UIImage) {
+    init(image: UIImage, group: ZoomGroup?, maxZoom: CGFloat) {
         super.init(frame: .zero)
+        self.group = group
         imageView.image = image
         addSubview(imageView)
         delegate = self
         minimumZoomScale = 1
-        maximumZoomScale = 4
+        maximumZoomScale = maxZoom
         bouncesZoom = true
         decelerationRate = .fast
         showsHorizontalScrollIndicator = false
@@ -74,6 +71,7 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
         doubleTap.numberOfTapsRequired = 2
         addGestureRecognizer(doubleTap)
+        group?.register(self)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
