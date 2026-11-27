@@ -8,8 +8,8 @@ import UIKit
 ///
 /// Compare splits the view into two panes with zoom and pan locked together, loading the
 /// full-resolution RAW of both: the frame you were on, and the best-ranked other frame. The
-/// panes are labelled A and B (and so are their filmstrip thumbnails); the filmstrip picks
-/// pane B; Swap exchanges them. Single-frame moments have no
+/// filmstrip marks which pane each frame is in and picks the second pane; Swap exchanges
+/// them. Single-frame moments have no
 /// filmstrip or compare.
 struct MomentViewer: View {
     @ObservedObject var model: ImportModel
@@ -37,8 +37,8 @@ struct MomentViewer: View {
                 let sideBySide = model.aspect(shown, clamped: false) < 1
                 let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 2)) : AnyLayout(VStackLayout(spacing: 2))
                 layout {
-                    pane(shown, ranking: ranking, comparing: true, letter: "A")
-                    pane(other, ranking: ranking, comparing: true, letter: "B") {
+                    pane(shown, ranking: ranking, comparing: true)
+                    pane(other, ranking: ranking, comparing: true) {
                         current = other
                         challenger = shown
                     }
@@ -48,7 +48,8 @@ struct MomentViewer: View {
             }
             if ids.count > 1 {
                 Filmstrip(model: model, ids: ids, current: shown, challenger: other,
-                          suggested: ranking?.suggested) { id in
+                          suggested: ranking?.suggested,
+                          sideBySide: model.aspect(shown, clamped: false) < 1) { id in
                     if other != nil {
                         if id != shown { challenger = id }
                     } else {
@@ -75,7 +76,7 @@ struct MomentViewer: View {
     }
 
     private func pane(_ id: String, ranking: ImportModel.Ranking?, comparing: Bool,
-                      letter: String? = nil, swap: (() -> Void)? = nil) -> some View {
+                      swap: (() -> Void)? = nil) -> some View {
         ViewerPane(
             model: model,
             shot: model.shots[id],
@@ -84,7 +85,6 @@ struct MomentViewer: View {
             details: showDetails ? details(id, ranking?.breakdowns[id]) : nil,
             group: group,
             loadsRAW: comparing,
-            letter: letter,
             swap: swap,
             step: comparing ? nil : { step($0) }
         )
@@ -135,8 +135,6 @@ private struct ViewerPane: View {
     let details: String?
     let group: ZoomGroup
     let loadsRAW: Bool
-    /// "A" or "B" in compare, matching the filmstrip.
-    let letter: String?
     /// Makes this pane the first one (compare's second pane only).
     let swap: (() -> Void)?
     /// Swipe to the next/previous frame (single view only).
@@ -182,9 +180,6 @@ private struct ViewerPane: View {
                 }
                 .overlay(alignment: .topTrailing) {
                     if isSuggested { SuggestedBadge() }
-                }
-                .overlay(alignment: .top) {
-                    if let letter { PaneLetter(letter: letter).padding(.top, 16) }
                 }
                 .overlay(alignment: .bottomLeading) {
                     VStack(alignment: .leading, spacing: -14) {
@@ -271,29 +266,36 @@ private struct ViewerPane: View {
     }
 }
 
-/// "A" / "B": which compare pane a frame is in, shown on the pane and under its thumbnail.
-private struct PaneLetter: View {
-    let letter: String
+/// Which compare pane a filmstrip frame is in: a miniature of the two-pane layout (stacked,
+/// or side by side for portrait frames) with this frame's pane filled.
+private struct PaneMarker: View {
+    /// 0 = first pane (top / left), 1 = second (bottom / right).
+    let pane: Int
+    let sideBySide: Bool
 
     var body: some View {
-        Text(letter)
-            .font(.caption2.weight(.heavy))
-            .foregroundStyle(.black)
-            .frame(minWidth: 18, minHeight: 16)
-            .background(.white, in: Capsule())
-            .accessibilityLabel("Pane \(letter)")
+        let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 1.5)) : AnyLayout(VStackLayout(spacing: 1.5))
+        layout {
+            ForEach(0..<2) { i in
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(i == pane ? Color.white : Color.white.opacity(0.25))
+                    .frame(width: sideBySide ? 7 : 14, height: sideBySide ? 10 : 5)
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
 /// Every frame of the moment, with selection (top-left) and suggestion (top-right) marks.
-/// Under each thumbnail: a bar for the frame shown, or in compare the A / B pane it's in.
-/// Tap to show a frame (or, in compare, to put it in pane B).
+/// Under each thumbnail: a bar for the frame shown, or in compare which pane it's in.
+/// Tap to show a frame (or, in compare, to put it in the second pane).
 private struct Filmstrip: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
     let current: String
     let challenger: String?
     let suggested: String?
+    let sideBySide: Bool
     let select: (String) -> Void
 
     var body: some View {
@@ -328,7 +330,11 @@ private struct Filmstrip: View {
 
     @ViewBuilder private func marker(_ id: String) -> some View {
         if challenger != nil {
-            if id == current { PaneLetter(letter: "A") } else if id == challenger { PaneLetter(letter: "B") }
+            if id == current {
+                PaneMarker(pane: 0, sideBySide: sideBySide)
+            } else if id == challenger {
+                PaneMarker(pane: 1, sideBySide: sideBySide)
+            }
         } else if id == current {
             Capsule().fill(.white).frame(width: 18, height: 3)
         }
@@ -336,8 +342,9 @@ private struct Filmstrip: View {
 
     private func accessibilityLabel(_ id: String) -> String {
         var parts = ["Frame \((ids.firstIndex(of: id) ?? 0) + 1)"]
-        if challenger != nil, id == current { parts.append("pane A") }
-        if id == challenger { parts.append("pane B") }
+        let first = sideBySide ? "left pane" : "top pane", second = sideBySide ? "right pane" : "bottom pane"
+        if challenger != nil, id == current { parts.append(first) }
+        if id == challenger { parts.append(second) }
         if challenger == nil, id == current { parts.append("shown") }
         if id == suggested { parts.append("suggested") }
         if model.isSelected(id) { parts.append("selected") }
