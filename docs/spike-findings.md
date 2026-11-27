@@ -13,8 +13,10 @@ using the FujiDropSpike app. Answers the four "risks to test first" in [leverage
 Camera capabilities reported: `ICCameraDeviceSupportsHEIF`, `ICCameraDeviceCanDeleteOneFile`,
 `ICCameraDeviceCanAcceptPTPCommands`.
 
-**Still to measure:** full RAF download time over the cable (sets the cost of full-size close-call
-comparison), and on-phone JPEG render time for RAW-only shots.
+**Full RAF download:** 33.3 MB in 1.41 s (23.6 MB/s), near the X-T1's USB 2.0 ceiling. Fetching the
+top 3 candidates of a moment for full-size comparison costs about 4 s.
+
+**Still to measure:** on-phone JPEG render time for RAW-only shots.
 
 ## Implications
 
