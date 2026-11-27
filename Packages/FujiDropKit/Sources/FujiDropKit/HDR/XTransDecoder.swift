@@ -37,11 +37,6 @@ public struct XTransImage: @unchecked Sendable {
         self.exposure = exposure
         self.properties = properties
     }
-
-    /// Camera-native linear value of channel `c` at a pixel index (1.0 = saturation).
-    @inline(__always) public func native(_ i: Int, _ c: Int) -> Float {
-        Float(pixels[i * 3 + c]) / (wb[c] * 65535)
-    }
 }
 
 public enum XTransDecoder {
@@ -92,7 +87,7 @@ public enum XTransDecoder {
         var failure: Error?
         let lock = NSLock()
         sensor.withUnsafeMutableBufferPointer { out in
-            let out = Shared(out)
+            let out = SendableBox(out)
             DispatchQueue.concurrentPerform(iterations: n) { k in
                 let y0 = sensorH * k / n, y1 = sensorH * (k + 1) / n
                 let cy = n == 1 ? 0 : max(0, y0 - overlap) / 6 * 6
@@ -140,7 +135,7 @@ public enum XTransDecoder {
         let x = color.cam_xyz
         let camXYZ = [x.0.0, x.0.1, x.0.2, x.1.0, x.1.1, x.1.2, x.2.0, x.2.1, x.2.2]
 
-        let props = imageProperties(url)
+        let props = ImageLoading.properties(at: url)
         let exposure = Exposure(properties: props) ?? Exposure(
             time: Double(other.shutter), fNumber: Double(other.aperture), iso: Double(other.iso_speed), bias: 0,
             date: other.timestamp > 0 ? Date(timeIntervalSince1970: TimeInterval(other.timestamp)) : nil)
@@ -190,7 +185,7 @@ public enum XTransDecoder {
         var out = [UInt16](repeating: 0, count: src.count)
         src.withUnsafeBufferPointer { s in
             out.withUnsafeMutableBufferPointer { d in
-                let d = Shared(d)
+                let d = SendableBox(d)
                 DispatchQueue.concurrentPerform(iterations: outH) { r in
                     for c in 0..<outW {
                         var row = r, col = c
@@ -204,11 +199,5 @@ public enum XTransDecoder {
             }
         }
         return (out, outW, outH)
-    }
-
-    static func imageProperties(_ url: URL) -> [String: Any] {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] else { return [:] }
-        return p
     }
 }

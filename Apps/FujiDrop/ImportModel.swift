@@ -139,6 +139,11 @@ final class ImportModel: ObservableObject {
     @Published private(set) var merging: [String: MergeState] = [:]
     private var mergeTasks: [String: Task<MergeCache.Entry?, Never>] = [:]
     private let mergeCache = MergeCache()
+    /// Finished merges on disk, by merge key, so `regroup` and the viewer never touch the file
+    /// system on the main actor. Filled when a merge finishes and by one background lookup per
+    /// bracket (`mergeLookups`); cleared after pruning so the lookups run again.
+    private var mergeEntries: [String: MergeCache.Entry] = [:]
+    private var mergeLookups: Set<String> = []
     /// Brackets merged at some point, by merge key, so their HDR frame shows (and is rebuilt
     /// if the cache was pruned) whenever the day is open.
     private var knownMerges = Set(UserDefaults.standard.stringArray(forKey: ImportModel.mergesKey) ?? [])
@@ -259,6 +264,7 @@ final class ImportModel: ObservableObject {
         brackets = []; bracketOf = [:]
         mergeTasks.values.forEach { $0.cancel() }
         mergeTasks = [:]; merging = [:]
+        mergeEntries = [:]; mergeLookups = []
     }
 
     /// Stops everything that talks to the camera. Analysis of previews already on disk
@@ -491,9 +497,7 @@ final class ImportModel: ObservableObject {
     /// The shot's RAF if it's already downloaded.
     func cachedRawURL(_ id: String) -> URL? {
         guard let shot = shots[id] else { return nil }
-        if let sources = shot.mergedFrom {
-            return mergeCache.entry(key: mergeKey(sources), name: id)?.dng
-        }
+        if let sources = shot.mergedFrom { return mergeEntries[mergeKey(sources)]?.dng }
         return rawCache.cachedURL(name: id, size: shot.size)
     }
 
@@ -646,7 +650,8 @@ final class ImportModel: ObservableObject {
         let id = mergedID(ids)
         let key = "\(cameraID ?? "")/merge-\(mergeKey(ids))"
         guard let first = ids.first.flatMap({ shots[$0] }) else { return id }
-        let entry = mergeCache.entry(key: mergeKey(ids), name: id)
+        let entry = mergeEntries[mergeKey(ids)]
+        if entry == nil { lookUpMerge(ids) }
         if var existing = shots[id], existing.key == key {
             if existing.previewURL != entry?.jpeg {
                 existing.previewURL = entry?.jpeg
@@ -670,6 +675,17 @@ final class ImportModel: ObservableObject {
         return id
     }
 
+    /// Finds a finished merge on disk off the main actor (once per bracket), then shows it.
+    private func lookUpMerge(_ ids: [String]) {
+        let key = mergeKey(ids), name = mergedID(ids), cache = mergeCache
+        guard mergeLookups.insert(key).inserted else { return }
+        Task {
+            guard let entry = await Background.decode({ cache.entry(key: key, name: name) }) else { return }
+            mergeEntries[key] = entry
+            if order.contains(ids[0]) { regroup() }
+        }
+    }
+
     private func loadMergedThumbnail(_ id: String, key: String, url: URL) {
         Task {
             let thumb = await Background.decode { ImageLoading.thumbnail(at: url, maxPixelSize: 360) }
@@ -689,7 +705,11 @@ final class ImportModel: ObservableObject {
     func mergedEntry(_ ids: [String]) async -> MergeCache.Entry? {
         let key = mergeKey(ids), name = mergedID(ids)
         let cache = mergeCache
-        if let entry = await Background.decode({ cache.entry(key: key, name: name) }) { return entry }
+        if let entry = mergeEntries[key] { return entry }
+        if let entry = await Background.decode({ cache.entry(key: key, name: name) }) {
+            mergeEntries[key] = entry
+            return entry
+        }
         if let running = mergeTasks[key] { return await running.value }
         let task = Task { [weak self] () -> MergeCache.Entry? in
             guard let self else { return nil }
@@ -722,9 +742,7 @@ final class ImportModel: ObservableObject {
                 return Task.isCancelled ? nil : fail("Couldn't download \(id)")
             }
             let link = work.appendingPathComponent(cached.lastPathComponent)
-            if (try? FileManager.default.linkItem(at: cached, to: link)) == nil {
-                guard (try? FileManager.default.copyItem(at: cached, to: link)) != nil else { return fail("Couldn't copy \(id)") }
-            }
+            guard (try? FileManager.default.linkOrCopy(cached, to: link)) != nil else { return fail("Couldn't copy \(id)") }
             raws.append(link)
         }
         let previews = ids.map { shots[$0]?.previewURL }
@@ -749,11 +767,18 @@ final class ImportModel: ObservableObject {
             camera.record(String(format: "HDR %@: done in %.1f s", name, Date().timeIntervalSince(started)))
             knownMerges.insert(key)
             UserDefaults.standard.set(Array(knownMerges), forKey: Self.mergesKey)
+            let entry = MergeCache.Entry(dng: output.dng, jpeg: output.jpeg)
+            mergeEntries[key] = entry
             let cache = mergeCache
-            Task.detached(priority: .utility) { cache.prune() }
-            // The shot may have to pick up the new files (rebuilt after pruning).
+            Task {
+                await Background.decode { cache.prune() }
+                // Some may be gone now: forget them all and look them up again.
+                mergeEntries = mergeEntries.filter { $0.key == key }
+                mergeLookups = [key]
+            }
+            // The shot picks up the new files (or appears, for a first merge).
             if order.contains(ids[0]) { regroup() }
-            return MergeCache.Entry(dng: output.dng, jpeg: output.jpeg)
+            return entry
         }
     }
 

@@ -3,20 +3,8 @@ import Foundation
 import Photos
 import UIKit
 
-/// Saves selections to Photos one at a time in the background: get the RAF (shared with
-/// compare's cache), render a full-size JPEG on the phone, then save both as one RAW+JPEG
-/// asset with the RAF as the editing base. A merged HDR frame saves its DNG and the JPEG the
-/// merge rendered the same way (the DNG is the editing base). About 3 s per pick; less if compare already
-/// downloaded and decoded the RAF. The next pick's RAF downloads while this one renders.
-///
-/// With Settings › Save RAW as › DNG, a camera frame is converted on the phone instead
-/// (`DNGConverter`: LibRaw decode, linear DNG, JPEG from the same decode) and the DNG becomes
-/// the editing base; "Also keep RAF files" copies the original into the app's Files folder.
-///
-/// Survives unplugging: `ImportModel.rawURL` waits for the camera to come back. Ending the
-/// session (or a different camera) clears the queue.
 /// How a camera frame's RAW is saved (Settings › Save RAW as).
-enum SaveFormat: String, CaseIterable, Identifiable {
+enum SaveFormat: String {
     /// The camera's RAF, with a JPEG from Apple's RAW engine.
     case raf
     /// A linear DNG from LibRaw (sharper detail, less false colour), with a JPEG from the same decode.
@@ -24,7 +12,6 @@ enum SaveFormat: String, CaseIterable, Identifiable {
     /// A merged HDR frame (always DNG); recorded, never chosen in Settings.
     case hdr
 
-    var id: String { rawValue }
     static let key = "saveFormat"
     static let keepRAFKey = "keepRAF"
 
@@ -40,6 +27,18 @@ enum SaveFormat: String, CaseIterable, Identifiable {
     }
 }
 
+/// Saves selections to Photos one at a time in the background: get the RAF (shared with
+/// compare's cache), render a full-size JPEG on the phone, then save both as one RAW+JPEG
+/// asset with the RAF as the editing base. A merged HDR frame saves its DNG and the JPEG the
+/// merge rendered the same way (the DNG is the editing base). About 3 s per pick; less if compare already
+/// downloaded and decoded the RAF. The next pick's RAF downloads while this one renders.
+///
+/// With Settings › Save RAW as › DNG, a camera frame is converted on the phone instead
+/// (`DNGConverter`: LibRaw decode, linear DNG, JPEG from the same decode) and the DNG becomes
+/// the editing base; "Also keep RAF files" copies the original into the app's Files folder.
+///
+/// Survives unplugging: `ImportModel.rawURL` waits for the camera to come back. Ending the
+/// session (or a different camera) clears the queue.
 @MainActor
 final class SaveQueue: ObservableObject {
     struct Progress: Equatable {
@@ -250,18 +249,17 @@ final class SaveQueue: ObservableObject {
         try Task.checkCancellation()
         guard let shot = model.shots[item.id], shot.key == item.key else { throw SaveError.notOnCard }
 
-        // Work from a hard link in our own folder: the RAF cache keeps only a few files and
-        // other downloads may prune this one mid-save. Same name, so Photos gets DSCF1234.RAF.
+        // Work from hard links in our own folder: the RAF cache keeps only a few files and
+        // other downloads may prune them mid-save. Same names, so Photos gets DSCF1234.RAF.
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("Renders", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let raw = folder.appendingPathComponent(cached.lastPathComponent)
-        do {
-            try FileManager.default.linkItem(at: cached, to: raw)
-        } catch {
-            try FileManager.default.copyItem(at: cached, to: raw)
+        func local(_ url: URL) throws -> URL {
+            let link = folder.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.linkOrCopy(url, to: link)
+            return link
         }
 
         // Fetch the next selection's RAF while this one renders (camera and CPU in parallel).
@@ -270,69 +268,67 @@ final class SaveQueue: ObservableObject {
             prefetch = Task { [model] in _ = await model.rawURL(next.id) }
         }
 
-        // A merged HDR frame already has its JPEG, rendered from the DNG by the merge.
-        let mergedJPEG = shot.isMerged ? cached.deletingPathExtension().appendingPathExtension("JPG") : nil
-        if let mergedJPEG {
-            let jpeg = folder.appendingPathComponent(mergedJPEG.lastPathComponent)
-            if (try? FileManager.default.linkItem(at: mergedJPEG, to: jpeg)) == nil {
-                try FileManager.default.copyItem(at: mergedJPEG, to: jpeg)
-            }
-            let assetID = try await PhotoSaver.savePair(jpeg: jpeg, raw: raw, creationDate: shot.date)
-            model.markSaved(key: item.key, assetID: assetID, format: .hdr)
-            model.camera.record(String(format: "Saved %@ (HDR DNG) to Photos in %.1f s", item.id, Date().timeIntervalSince(started)))
-            return
-        }
-
-        if SaveFormat.current == .dng {
+        // The pair to save: a JPEG and its RAW (RAF or DNG).
+        let jpeg: URL, raw: URL, format: SaveFormat
+        if let sources = shot.mergedFrom {
+            // A merged HDR frame: its DNG and the JPEG the merge rendered.
+            guard let entry = await model.mergedEntry(sources) else { throw SaveError.downloadFailed }
+            (jpeg, raw, format) = (try local(entry.jpeg), try local(entry.dng), .hdr)
+        } else if SaveFormat.current == .dng {
             // LibRaw decode → linear DNG + a JPEG from the same pixels.
+            let rafLink = try local(cached)
             let preview = shot.previewURL, name = shot.id
             let output = try await Background.raw { () -> Result<DNGConverter.Output, Error> in
-                Result { try DNGConverter.convert(raw: raw, preview: preview, name: name, into: folder) }
+                Result { try DNGConverter.convert(raw: rafLink, preview: preview, name: name, into: folder) }
             }.get()
-            try Task.checkCancellation()
-            if UserDefaults.standard.bool(forKey: SaveFormat.keepRAFKey) { keepOriginal(raw, size: shot.size) }
-            let assetID = try await PhotoSaver.savePair(jpeg: output.jpeg, raw: output.dng, creationDate: shot.date)
-            model.markSaved(key: item.key, assetID: assetID, format: .dng)
             output.report.forEach { model.camera.record("DNG \(item.id): \($0)") }
-            model.camera.record(String(format: "Saved %@ (DNG) to Photos in %.1f s", item.id, Date().timeIntervalSince(started)))
-            return
+            if UserDefaults.standard.bool(forKey: SaveFormat.keepRAFKey) { await keepOriginal(rafLink, size: shot.size) }
+            (jpeg, raw, format) = (output.jpeg, output.dng, .dng)
+        } else {
+            // The RAF, with a full-size JPEG from Apple's RAW engine, reusing compare's decode if
+            // any. Either way the brightness matches the camera's own JPEG (see RAWRenderer).
+            let rafLink = try local(cached)
+            let decoded = PreviewImageLoader.shared.cachedFullResolution(raw: cached)?.cgImage
+            let preview = shot.previewURL
+            jpeg = try await Background.raw { () -> Result<URL, Error> in
+                Result {
+                    let reference = decoded == nil ? preview.flatMap { ImageLoading.thumbnail(at: $0, maxPixelSize: 256) } : nil
+                    return try RAWRenderer.renderJPEG(from: rafLink, image: decoded, matching: reference, into: folder)
+                }
+            }.get()
+            (raw, format) = (rafLink, .raf)
         }
-
-        // Render the full-size JPEG off the main actor, reusing compare's decode if any.
-        // Either way the brightness matches the camera's own JPEG (see RAWRenderer).
-        let decoded = PreviewImageLoader.shared.cachedFullResolution(raw: cached)?.cgImage
-        let preview = shot.previewURL
-        let jpeg = try await Background.raw { () -> Result<URL, Error> in
-            Result {
-                let reference = decoded == nil ? preview.flatMap { ImageLoading.thumbnail(at: $0, maxPixelSize: 256) } : nil
-                return try RAWRenderer.renderJPEG(from: raw, image: decoded, matching: reference, into: folder)
-            }
-        }.get()
         try Task.checkCancellation()
 
         let assetID = try await PhotoSaver.savePair(jpeg: jpeg, raw: raw, creationDate: shot.date)
-        model.markSaved(key: item.key, assetID: assetID, format: .raf)
-        model.camera.record(String(format: "Saved %@ to Photos in %.1f s", item.id, Date().timeIntervalSince(started)))
+        model.markSaved(key: item.key, assetID: assetID, format: format)
+        model.camera.record(String(format: "Saved %@ (%@) to Photos in %.1f s", item.id, raw.pathExtension,
+                                   Date().timeIntervalSince(started)))
     }
 
-    /// Copies the RAF into Documents/RAF (the Files app). A Photos asset holds one RAW, so with
-    /// DNG saves this is the only place the original survives. A different file with the same
-    /// name (another card) gets its size appended. Best effort: a failure doesn't stop the save.
-    private func keepOriginal(_ raw: URL, size: Int64) {
+    /// Copies the RAF into Documents/RAF (the Files app), off the main actor. A Photos asset
+    /// holds one RAW, so with DNG saves this is the only place the original survives. A
+    /// different file with the same name (another card) gets its size appended. Best effort:
+    /// a failure doesn't stop the save.
+    private func keepOriginal(_ raw: URL, size: Int64) async {
         let folder = SaveFormat.keptRAFFolder
-        let fm = FileManager.default
-        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        var target = folder.appendingPathComponent(raw.lastPathComponent)
-        if let existing = (try? fm.attributesOfItem(atPath: target.path))?[.size] as? Int64 {
-            if existing == size { return }
-            let base = raw.deletingPathExtension().lastPathComponent
-            target = folder.appendingPathComponent("\(base)-\(size).\(raw.pathExtension)")
-            if fm.fileExists(atPath: target.path) { return }
+        let error = await Background.decode { () -> String? in
+            let fm = FileManager.default
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var target = folder.appendingPathComponent(raw.lastPathComponent)
+            if let existing = (try? fm.attributesOfItem(atPath: target.path))?[.size] as? Int64 {
+                if existing == size { return nil }
+                let base = raw.deletingPathExtension().lastPathComponent
+                target = folder.appendingPathComponent("\(base)-\(size).\(raw.pathExtension)")
+                if fm.fileExists(atPath: target.path) { return nil }
+            }
+            do {
+                try fm.linkOrCopy(raw, to: target)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
         }
-        do {
-            try fm.copyItem(at: raw, to: target)
-        } catch {
-            model.camera.record("Keeping \(raw.lastPathComponent) failed: \(error.localizedDescription)")
-        }
+        if let error { model.camera.record("Keeping \(raw.lastPathComponent) failed: \(error)") }
     }
 }

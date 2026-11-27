@@ -34,9 +34,7 @@ public struct Exposure: Equatable, Sendable {
 
     /// Reads the EXIF of an image file without decoding it (a few milliseconds).
     public init?(contentsOf url: URL) {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] else { return nil }
-        self.init(properties: p)
+        self.init(properties: ImageLoading.properties(at: url))
     }
 
     /// Exposure value at ISO 100: log2(N²/t) − log2(ISO/100). One stop more light = 1 less.
@@ -45,14 +43,17 @@ public struct Exposure: Equatable, Sendable {
     /// Light captured relative to `other`, in stops (+1 = twice the exposure).
     public func stops(relativeTo other: Exposure) -> Double { other.ev - ev }
 
-    private static func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue }
+    /// An EXIF number (ImageIO gives NSNumber, whatever the tag's type).
+    static func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue }
 
-    private static func parse(_ s: String) -> Date? {
+    private static let exifDate: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        return f.date(from: s)
-    }
+        return f
+    }()
+
+    private static func parse(_ s: String) -> Date? { exifDate.date(from: s) }
 }
 
 /// Finds exposure brackets: runs of frames of one scene, shot seconds apart, each at a

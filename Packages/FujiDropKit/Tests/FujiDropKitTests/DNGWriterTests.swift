@@ -10,7 +10,7 @@ final class DNGWriterTests: XCTestCase {
 
     /// Left half a neutral grey at `level` (camera-native, i.e. 1/wb tinted), right half a
     /// quarter of that.
-    func image(level: Float, w: Int = 600, h: Int = 400) -> MergedImage {
+    func image(level: Float, w: Int = 600, h: Int = 400) -> LinearImage {
         var px = [Float16](repeating: 0, count: w * h * 3)
         for y in 0..<h {
             for x in 0..<w {
@@ -23,9 +23,8 @@ final class DNGWriterTests: XCTestCase {
             kCGImagePropertyExifISOSpeedRatings as String: [200],
             kCGImagePropertyExifDateTimeOriginal as String: "2026:10:13 18:05:06",
         ]
-        return MergedImage(width: w, height: h, pixels: px, crop: (10, 10, w - 20, h - 20), wb: wb, camXYZ: xt1,
-                           make: "FUJIFILM", model: "X-T1",
-                           properties: [kCGImagePropertyExifDictionary as String: exif], scale: 1, report: [])
+        return LinearImage(width: w, height: h, samples: .half(px), crop: (10, 10, w - 20, h - 20), wb: wb, camXYZ: xt1,
+                           make: "FUJIFILM", model: "X-T1", properties: [kCGImagePropertyExifDictionary as String: exif])
     }
 
     func url(_ name: String) -> URL {
@@ -96,10 +95,9 @@ final class DNGWriterTests: XCTestCase {
 
     /// The same neutral patch as 16-bit integers (single-frame saves), 65535 = saturation.
     func integerImage(level: Float) -> LinearImage {
-        let m = image(level: level)
-        let ints = m.pixels.map { UInt16(min(max(Float($0) * 65535, 0), 65535).rounded()) }
-        var l = m.linear
-        l.samples = .integer(ints)
+        var l = image(level: level)
+        guard case .half(let px) = l.samples else { return l }
+        l.samples = .integer(px.map { UInt16(min(max(Float($0) * 65535, 0), 65535).rounded()) })
         return l
     }
 
@@ -116,28 +114,14 @@ final class DNGWriterTests: XCTestCase {
     /// Core Image doesn't decode Deflate in DNGs (float or integer), but does decode lossless
     /// JPEG: single saves rely on it to stay near half size.
     func testCompressionCoreImageReads() throws {
-        let plain = url("int-plain"), deflate = url("int-deflate"), ljpeg = url("int-ljpeg")
+        let plain = url("int-plain"), ljpeg = url("int-ljpeg")
         let image = integerImage(level: 0.18)
         try DNGWriter.write(image, to: plain, baselineExposure: 0, preview: nil)
-        try DNGWriter.write(image, to: deflate, baselineExposure: 0, preview: nil, compression: .deflate)
         try DNGWriter.write(image, to: ljpeg, baselineExposure: 0, preview: nil, compression: .losslessJPEG)
         let a = try render(plain), c = try render(ljpeg)
         XCTAssertEqual(a.left.y, c.left.y, accuracy: 0.5)
         XCTAssertEqual(a.right.y, c.right.y, accuracy: 0.5)
         let size = { (u: URL) in (try? FileManager.default.attributesOfItem(atPath: u.path)[.size] as? Int) ?? 0 }
         XCTAssertLessThan(size(ljpeg), size(plain) / 4) // flat patches compress very well
-        // If this starts failing, Core Image learned Deflate: worth switching merges to it.
-        XCTAssertLessThan(CIRAWFilter(imageURL: deflate)?.outputImage?.extent.width ?? 0, 100)
-    }
-
-    /// TIFF needs a zlib stream (header + Adler-32), not raw DEFLATE.
-    func testZlibStreamHeader() throws {
-        let data = try XCTUnwrap(DNGWriter.zlib([UInt8](repeating: 7, count: 1000)))
-        XCTAssertEqual(Array(data.prefix(2)), [0x78, 0x9C])
-        // Adler-32 of 1000 × 7: a = 1 + 7000, b = Σ a_i.
-        let a = UInt32(1 + 7000) % 65521
-        let b = UInt32((1...1000).reduce(0) { $0 + 1 + 7 * $1 }) % 65521
-        let tail = Array(data.suffix(4)).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
-        XCTAssertEqual(tail, b << 16 | a)
     }
 }

@@ -24,3 +24,15 @@ enum Background {
         }
     }
 }
+
+extension FileManager {
+    /// Hard-links `source` to `destination` (instant, no extra space), or copies it if linking
+    /// isn't possible (another volume).
+    func linkOrCopy(_ source: URL, to destination: URL) throws {
+        do {
+            try linkItem(at: source, to: destination)
+        } catch {
+            try copyItem(at: source, to: destination)
+        }
+    }
+}

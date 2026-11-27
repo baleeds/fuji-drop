@@ -42,33 +42,21 @@ public struct LinearImage: @unchecked Sendable {
     }
 }
 
-/// A merged bracket: linear camera-native RGB, ready for a linear DNG.
-public struct MergedImage: @unchecked Sendable {
-    public var width: Int
-    public var height: Int
-    /// Interleaved camera-native RGB (not white-balanced), scaled so the brightest value is 1.
-    public var pixels: [Float16]
-    /// The area every frame covers after alignment (pixels), for the DNG's default crop.
-    public var crop: (x: Int, y: Int, width: Int, height: Int)
-    /// The reference frame's as-shot white-balance multipliers (R, G, B).
-    public var wb: [Float]
-    /// XYZ (D65) → camera, 3×3 row-major.
-    public var camXYZ: [Float]
-    public var make: String
-    public var model: String
-    /// The reference frame's ImageIO properties (EXIF, TIFF), for the outputs' metadata.
-    public var properties: [String: Any]
-    /// What 1.0 in `pixels` is, in units of the reference frame's sensor saturation: the
+/// A merged bracket: half floats, 1.0 = the brightest value, ready for a linear DNG.
+public struct MergedImage: Sendable {
+    /// The merged pixels, with the reference frame's white balance, colour matrix and
+    /// metadata, and the default crop set to the area every frame covers.
+    public var image: LinearImage
+    /// What 1.0 in the pixels is, in units of the reference frame's sensor saturation: the
     /// merge divided by this. log2 of it is roughly how much darker the merged data renders
     /// than the reference frame at the same exposure.
     public var scale: Float
     /// One line per frame (scale, shift), for the log.
     public var report: [String]
 
-    /// The same pixels (shared, not copied) as a DNG source.
-    public var linear: LinearImage {
-        LinearImage(width: width, height: height, samples: .half(pixels), crop: crop, wb: wb, camXYZ: camXYZ,
-                    make: make, model: model, properties: properties)
+    public var pixels: [Float16] {
+        if case .half(let px) = image.samples { return px }
+        return []
     }
 }
 
@@ -136,15 +124,16 @@ public enum HDRMerger {
         let photonWeight = photons.map { $0 / (photons.max() ?? 1) }
 
         let grids = frames.map { LowRes($0) }
+        let typical = grids[reference].typical
 
         // 2. Alignment: a sampling transform per frame, reference pixel → frame pixel.
         var warps = [simd_float3x3?](repeating: nil, count: frames.count)
         var report: [String] = []
         if options.align {
-            let refGray = halfGray(ref, gain: 1, exposureLevel: grids[reference].typical)
+            let refGray = halfGray(ref, gain: 1, exposureLevel: typical)
             for k in frames.indices where k != reference {
-                let gray = halfGray(frames[k], gain: gain[k], exposureLevel: grids[reference].typical)
-                if let refGray, let gray, let m = homography(floating: gray, reference: refGray, fullHeight: h) {
+                let gray = halfGray(frames[k], gain: gain[k], exposureLevel: typical)
+                if let refGray, let gray, let m = homography(floating: gray, reference: refGray) {
                     let shift = maxShift(m, width: w, height: h)
                     if shift >= options.minShift { warps[k] = m }
                     report.append(String(format: "frame %d: shift %.1f px%@", k, shift, warps[k] == nil ? " (ignored)" : ""))
@@ -179,50 +168,60 @@ public enum HDRMerger {
         // Pixels every frame covers.
         let crop = coverage(warps, width: w, height: h)
 
-        // 3 + 5. Weight and combine, strip by strip.
-        var merged = [Float](repeating: 0, count: w * h * 3)
+        // 3 + 5. Weight and combine, strip by strip, straight into half floats (in units of the
+        // reference's saturation: well within half-float range), noting each strip's peak.
+        var merged = [Float16](repeating: 0, count: w * h * 3)
         let strips = (h + strip - 1) / strip
+        var peaks = [Float](repeating: 0, count: strips)
         merged.withUnsafeMutableBufferPointer { out in
-            let out = Shared(out)
-            DispatchQueue.concurrentPerform(iterations: strips) { s in
-                mergeStrip(rows: s * strip..<min(h, (s + 1) * strip), frames: frames, warps: warps,
-                           gain: gain, photonWeight: photonWeight, ghosts: ghosts, darkest: darkest,
-                           options: options, out: out.value)
+            peaks.withUnsafeMutableBufferPointer { peaks in
+                let out = SendableBox(out), peaks = SendableBox(peaks)
+                DispatchQueue.concurrentPerform(iterations: strips) { s in
+                    peaks.value[s] = mergeStrip(rows: s * strip..<min(h, (s + 1) * strip), frames: frames, warps: warps,
+                                                gain: gain, photonWeight: photonWeight, ghosts: ghosts, darkest: darkest,
+                                                options: options, out: out.value)
+                }
             }
         }
 
         // Brightest value → 1.0.
-        let peak = max(merged.withUnsafeBufferPointer { parallelMax($0) }, 1e-6)
-        let pixels: [Float16]
+        let peak = max(peaks.max() ?? 0, 1e-6)
         if options.cleanup {
-            pixels = ColorCleanup.clean(merged, width: w, height: h, whiteBalance: ref.wb, scale: 1 / peak)
+            merged = ColorCleanup.clean(merged, width: w, height: h, whiteBalance: ref.wb, scale: 1 / peak)
         } else {
-            pixels = merged.map { Float16($0 / peak) }
+            let scale = Float16(1 / peak)
+            merged.withUnsafeMutableBufferPointer { px in
+                let px = SendableBox(px)
+                DispatchQueue.concurrentPerform(iterations: strips) { s in
+                    for i in s * strip * w * 3..<min(h, (s + 1) * strip) * w * 3 { px.value[i] *= scale }
+                }
+            }
         }
-        return MergedImage(width: w, height: h, pixels: pixels, crop: crop, wb: ref.wb, camXYZ: ref.camXYZ,
-                           make: ref.make, model: ref.model, properties: ref.properties, scale: peak, report: report)
+        let image = LinearImage(width: w, height: h, samples: .half(merged), crop: crop, wb: ref.wb, camXYZ: ref.camXYZ,
+                                make: ref.make, model: ref.model, properties: ref.properties)
+        return MergedImage(image: image, scale: peak, report: report)
     }
 
     // MARK: Strips
 
+    /// Merges `rows` into `out` and returns the strip's largest value.
     private static func mergeStrip(rows: Range<Int>, frames: [XTransImage], warps: [simd_float3x3?],
                                    gain: [Float], photonWeight: [Float], ghosts: [GhostMask?], darkest: Int,
-                                   options: Options, out: UnsafeMutableBufferPointer<Float>) {
+                                   options: Options, out: UnsafeMutableBufferPointer<Float16>) -> Float {
         let w = frames[0].width, h = frames[0].height
         let margin = 2
         let top = max(0, rows.lowerBound - margin), bottom = min(h, rows.upperBound + margin)
         let n = (bottom - top) * w
-        // Per frame: sampled RGB (camera-native, normalized to the reference exposure), the
-        // saturation measure (max white-balanced channel, 0…1), and whether it's inside the frame.
-        var values = [[Float]](repeating: [], count: frames.count)
-        var sat = [[Float]](repeating: [], count: frames.count)
-        var inside = [[Bool]](repeating: [], count: frames.count)
+        // Per frame, flat (frame k at k·n): sampled RGB (camera-native, normalized to the
+        // reference exposure), the saturation measure (max white-balanced channel, 0…1,
+        // dilated) and whether the pixel is inside the frame.
+        var values = [Float](repeating: 0, count: frames.count * n * 3)
+        var sat = [Float](repeating: 1, count: frames.count * n)
+        var inside = [Bool](repeating: false, count: frames.count * n)
         for k in frames.indices {
-            var v = [Float](repeating: 0, count: n * 3)
             var m = [Float](repeating: 1, count: n)
-            var ok = [Bool](repeating: false, count: n)
             let f = frames[k]
-            let norm = (0..<3).map { 1 / (f.wb[$0] * 65535 * gain[k]) }
+            let norm = SIMD3(f.wb[0], f.wb[1], f.wb[2]) * (65535 * gain[k])
             f.pixels.withUnsafeBufferPointer { px in
                 for y in top..<bottom {
                     for x in 0..<w {
@@ -237,47 +236,55 @@ public enum HDRMerger {
                             let i = (y * w + x) * 3
                             r = Float(px[i]); g = Float(px[i + 1]); b = Float(px[i + 2])
                         }
-                        ok[o] = true
+                        inside[k * n + o] = true
                         m[o] = max(r, g, b) / 65535
-                        v[o * 3] = r * norm[0]; v[o * 3 + 1] = g * norm[1]; v[o * 3 + 2] = b * norm[2]
+                        let v = SIMD3(r, g, b) / norm
+                        let i = (k * n + o) * 3
+                        values[i] = v.x; values[i + 1] = v.y; values[i + 2] = v.z
                     }
                 }
             }
-            values[k] = v
-            sat[k] = dilate(m, width: w, height: bottom - top, radius: margin)
-            inside[k] = ok
+            sat.replaceSubrange(k * n..<(k + 1) * n, with: dilate(m, width: w, height: bottom - top, radius: margin))
         }
 
         let span = options.saturationEnd - options.saturationStart
-        for y in rows {
-            for x in 0..<w {
-                let o = (y - top) * w + x
-                var sum = SIMD3<Float>(repeating: 0), total: Float = 0
-                for k in frames.indices where inside[k][o] {
-                    var weight = photonWeight[k] * min(max((options.saturationEnd - sat[k][o]) / span, 0), 1)
-                    if weight > 0, let ghost = ghosts[k] { weight *= ghost.value(x: x, y: y) }
-                    guard weight > 0 else { continue }
-                    let v = values[k]
-                    sum += weight * SIMD3(v[o * 3], v[o * 3 + 1], v[o * 3 + 2])
-                    total += weight
-                }
-                let result: SIMD3<Float>
-                if total > 1e-6 {
-                    result = sum / total
-                } else {
-                    // Clipped everywhere (or covered by no frame): the shortest exposure.
-                    let k = inside[darkest][o] ? darkest : frames.indices.first { inside[$0][o] }
-                    if let k {
-                        let v = values[k]
-                        result = SIMD3(v[o * 3], v[o * 3 + 1], v[o * 3 + 2])
-                    } else {
-                        result = .zero
+        var peak: Float = 0
+        values.withUnsafeBufferPointer { values in
+            sat.withUnsafeBufferPointer { sat in
+                inside.withUnsafeBufferPointer { inside in
+                    func value(_ k: Int, _ o: Int) -> SIMD3<Float> {
+                        let i = (k * n + o) * 3
+                        return SIMD3(values[i], values[i + 1], values[i + 2])
+                    }
+                    for y in rows {
+                        for x in 0..<w {
+                            let o = (y - top) * w + x
+                            var sum = SIMD3<Float>(repeating: 0), total: Float = 0
+                            for k in frames.indices where inside[k * n + o] {
+                                var weight = photonWeight[k] * min(max((options.saturationEnd - sat[k * n + o]) / span, 0), 1)
+                                if weight > 0, let ghost = ghosts[k] { weight *= ghost.value(x: x, y: y) }
+                                guard weight > 0 else { continue }
+                                sum += weight * value(k, o)
+                                total += weight
+                            }
+                            let result: SIMD3<Float>
+                            if total > 1e-6 {
+                                result = sum / total
+                            } else if let k = inside[darkest * n + o] ? darkest : frames.indices.first(where: { inside[$0 * n + o] }) {
+                                // Clipped everywhere: the shortest exposure.
+                                result = value(k, o)
+                            } else {
+                                result = .zero // covered by no frame (outside the crop)
+                            }
+                            peak = max(peak, result.max())
+                            let i = (y * w + x) * 3
+                            out[i] = Float16(result.x); out[i + 1] = Float16(result.y); out[i + 2] = Float16(result.z)
+                        }
                     }
                 }
-                let i = (y * w + x) * 3
-                out[i] = result.x; out[i + 1] = result.y; out[i + 2] = result.z
             }
         }
+        return peak
     }
 
     @inline(__always)
@@ -315,21 +322,6 @@ public enum HDRMerger {
         return out
     }
 
-    private static func parallelMax(_ a: UnsafeBufferPointer<Float>) -> Float {
-        let parts = 16
-        var maxima = [Float](repeating: 0, count: parts)
-        maxima.withUnsafeMutableBufferPointer { m in
-            let m = Shared(m)
-            DispatchQueue.concurrentPerform(iterations: parts) { p in
-                let lo = a.count * p / parts, hi = a.count * (p + 1) / parts
-                var v: Float = 0
-                for i in lo..<hi { v = max(v, a[i]) }
-                m.value[p] = v
-            }
-        }
-        return maxima.max() ?? 0
-    }
-
     // MARK: Low-resolution grid
 
     /// Block averages of a frame (white-balanced RGB and luminance, 0…1 of clip) and which
@@ -352,7 +344,7 @@ public enum HDRMerger {
             rgb.withUnsafeMutableBufferPointer { m in
                 clipped.withUnsafeMutableBufferPointer { c in
                     f.pixels.withUnsafeBufferPointer { px in
-                        let m = Shared(m), c = Shared(c)
+                        let m = SendableBox(m), c = SendableBox(c)
                         DispatchQueue.concurrentPerform(iterations: gh) { by in
                             for bx in 0..<gw {
                                 var sum = SIMD3<Float>(repeating: 0)
@@ -483,7 +475,7 @@ public enum HDRMerger {
         var gray = [UInt8](repeating: 0, count: hw * hh)
         gray.withUnsafeMutableBufferPointer { out in
             f.pixels.withUnsafeBufferPointer { px in
-                let out = Shared(out)
+                let out = SendableBox(out)
                 DispatchQueue.concurrentPerform(iterations: hh) { y in
                     for x in 0..<hw {
                         var s: Float = 0
@@ -510,7 +502,7 @@ public enum HDRMerger {
     /// Vision's `warpTransform` maps the floating image onto the reference in bottom-left
     /// origin coordinates (checked with a synthetic shift). So: pixel centre → half size →
     /// flip y → inverse warp → flip back → full size → pixel index.
-    static func homography(floating: CGImage, reference: CGImage, fullHeight: Int) -> simd_float3x3? {
+    static func homography(floating: CGImage, reference: CGImage) -> simd_float3x3? {
         let request = VNHomographicImageRegistrationRequest(targetedCGImage: floating, options: [:])
         let handler = VNImageRequestHandler(cgImage: reference, options: [:])
         guard (try? handler.perform([request])) != nil,
@@ -522,7 +514,6 @@ public enum HDRMerger {
         let toHalf = simd_float3x3(rows: [SIMD3(0.5, 0, 0.25), SIMD3(0, 0.5, 0.25), SIMD3(0, 0, 1)]) // (x+0.5)/2
         let flip = simd_float3x3(rows: [SIMD3(1, 0, 0), SIMD3(0, -1, hh), SIMD3(0, 0, 1)])
         let toFull = simd_float3x3(rows: [SIMD3(2, 0, -0.5), SIMD3(0, 2, -0.5), SIMD3(0, 0, 1)]) // 2x − 0.5
-        _ = fullHeight
         return toFull * flip * warp.inverse * flip * toHalf
     }
 
@@ -537,6 +528,7 @@ public enum HDRMerger {
 
     /// The rectangle of reference pixels every frame covers (conservative, from the corners).
     static func coverage(_ warps: [simd_float3x3?], width: Int, height: Int) -> (x: Int, y: Int, width: Int, height: Int) {
+        if warps.allSatisfy({ $0 == nil }) { return (0, 0, width, height) }
         var x0: Float = 0, y0: Float = 0, x1 = Float(width - 1), y1 = Float(height - 1)
         for case let m? in warps {
             // Where the frame's own corners land in the reference.
@@ -554,7 +546,6 @@ public enum HDRMerger {
         let ix0 = Int(x0.rounded(.up) + 1) & ~1, iy0 = Int(y0.rounded(.up) + 1) & ~1
         let ix1 = Int(x1.rounded(.down)) - 1, iy1 = Int(y1.rounded(.down)) - 1
         let cw = max(2, (ix1 - ix0 + 1) & ~1), ch = max(2, (iy1 - iy0 + 1) & ~1)
-        if warps.allSatisfy({ $0 == nil }) { return (0, 0, width, height) }
         return (ix0, iy0, min(cw, width - ix0), min(ch, height - iy0))
     }
 }

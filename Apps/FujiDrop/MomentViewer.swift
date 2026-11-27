@@ -80,8 +80,7 @@ struct MomentViewer: View {
             if let bracket = bracket(ids, shown: shown), !model.isMerged(bracket),
                model.merging[model.mergeKey(bracket)] == nil {
                 Button {
-                    awaitedMerge = model.mergedID(bracket)
-                    model.merge(bracket)
+                    startMerge(bracket)
                 } label: {
                     Label("Merge", systemImage: "square.3.layers.3d")
                         .labelStyle(.titleAndIcon)
@@ -105,6 +104,12 @@ struct MomentViewer: View {
         return ids.lazy.compactMap { model.bracket(of: $0) }.first { !model.isMerged($0) }
     }
 
+    /// Merges the bracket and shows its HDR frame once it's done.
+    private func startMerge(_ bracket: [String]) {
+        awaitedMerge = model.mergedID(bracket)
+        model.merge(bracket)
+    }
+
     /// Merge progress or failure (with Retry) over the top of the viewer.
     @ViewBuilder private func mergeStatus(_ bracket: [String]?) -> some View {
         if let bracket {
@@ -119,10 +124,7 @@ struct MomentViewer: View {
             case .failed(let reason):
                 HStack(spacing: 8) {
                     Label("Merge failed: \(reason)", systemImage: "exclamationmark.triangle.fill")
-                    Button("Retry") {
-                        awaitedMerge = model.mergedID(bracket)
-                        model.merge(bracket)
-                    }
+                    Button("Retry") { startMerge(bracket) }
                     .bold()
                 }
                 .font(.caption.weight(.semibold))

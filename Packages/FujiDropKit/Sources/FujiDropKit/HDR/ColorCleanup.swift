@@ -16,15 +16,15 @@ public enum ColorCleanup {
     ///   - whiteBalance: multipliers applied before filtering and removed after.
     ///   - scale: applied to the output (e.g. 1 / peak).
     /// - Returns: cleaned camera-native RGB as half floats.
-    public static func clean(_ rgb: [Float], width: Int, height: Int, whiteBalance wb: [Float],
+    public static func clean(_ rgb: [Float16], width: Int, height: Int, whiteBalance wb: [Float],
                              scale: Float = 1) -> [Float16] {
         var out = [Float16](repeating: 0, count: rgb.count)
         let gain = SIMD3(wb[0], wb[1], wb[2])
         rgb.withUnsafeBufferPointer { src in
             out.withUnsafeMutableBufferPointer { dst in
-                let dst = Shared(dst)
+                let dst = SendableBox(dst)
                 run(width: width, height: height, load: { i in
-                    SIMD3(src[i * 3], src[i * 3 + 1], src[i * 3 + 2]) * gain
+                    SIMD3(Float(src[i * 3]), Float(src[i * 3 + 1]), Float(src[i * 3 + 2])) * gain
                 }, store: { i, v in
                     let n = v / gain * scale
                     dst.value[i * 3] = Float16(n.x); dst.value[i * 3 + 1] = Float16(n.y); dst.value[i * 3 + 2] = Float16(n.z)
@@ -41,7 +41,7 @@ public enum ColorCleanup {
         let gain = SIMD3(frame.wb[0], frame.wb[1], frame.wb[2])
         frame.pixels.withUnsafeBufferPointer { src in
             out.withUnsafeMutableBufferPointer { dst in
-                let dst = Shared(dst)
+                let dst = SendableBox(dst)
                 run(width: frame.width, height: frame.height, load: { i in
                     SIMD3(Float(src[i * 3]), Float(src[i * 3 + 1]), Float(src[i * 3 + 2]))
                 }, store: { i, v in
@@ -100,9 +100,8 @@ public enum ColorCleanup {
                         for c in 0..<3 {
                             let plane = c * n * w
                             for y in nextTop..<nextBottom {
-                                var rows = [Int](repeating: 0, count: 5)
-                                for dy in -radius...radius {
-                                    rows[dy + radius] = plane + (min(max(y + dy, validTop), validBottom - 1) - top) * w
+                                let rows = (-radius...radius).lazy.map {
+                                    plane + (min(max(y + $0, validTop), validBottom - 1) - top) * w
                                 }
                                 // 8 pixels at a time through the median network.
                                 var x = 0
@@ -195,24 +194,4 @@ public enum ColorCleanup {
     /// `medianNetwork` flattened (a, b, a, b, …) for the inner loop.
     private static let networkPairs: [Int] = medianNetwork.flatMap { [$0.0, $0.1] }
 
-    /// Median by Wirth's selection; reorders `a`.
-    @inline(__always) static func median(_ a: UnsafeMutablePointer<Float>, _ n: Int) -> Float {
-        let k = n / 2
-        var l = 0, m = n - 1
-        while l < m {
-            let x = a[k]
-            var i = l, j = m
-            repeat {
-                while a[i] < x { i += 1 }
-                while x < a[j] { j -= 1 }
-                if i <= j {
-                    let t = a[i]; a[i] = a[j]; a[j] = t
-                    i += 1; j -= 1
-                }
-            } while i <= j
-            if j < k { l = i }
-            if k < i { m = j }
-        }
-        return a[k]
-    }
 }

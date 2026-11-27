@@ -61,7 +61,7 @@ final class HDRMergerTests: XCTestCase {
     func testOneStopBracketReconstructsTheScene() throws {
         let m = try HDRMerger.merge([frame(stops: 0), frame(stops: 1), frame(stops: -1)], reference: 0, options: options())
         check(m, darkest: -1)
-        XCTAssertEqual(m.crop.width, w)
+        XCTAssertEqual(m.image.crop.width, w)
     }
 
     func testTwoStopBracketReconstructsTheScene() throws {
@@ -132,7 +132,7 @@ final class HDRMergerTests: XCTestCase {
     func testCleanupKeepsFlatColourAndLuminance() {
         let n = 32
         let rgb = [Float]((0..<n * n).flatMap { _ in [0.2, 0.3, 0.1] as [Float] })
-        let out = ColorCleanup.clean(rgb, width: n, height: n, whiteBalance: [1, 1, 1])
+        let out = ColorCleanup.clean(rgb.map { Float16($0) }, width: n, height: n, whiteBalance: [1, 1, 1])
         for i in stride(from: 0, to: out.count, by: 3) {
             XCTAssertEqual(Float(out[i]), 0.2, accuracy: 0.002)
             XCTAssertEqual(Float(out[i + 1]), 0.3, accuracy: 0.002)
@@ -145,7 +145,7 @@ final class HDRMergerTests: XCTestCase {
         var rgb = [Float](repeating: 0.25, count: n * n * 3)
         let i = (16 * n + 16) * 3
         rgb[i] = 0.5; rgb[i + 1] = 0.1; rgb[i + 2] = 0.5 // a magenta speck in grey
-        let out = ColorCleanup.clean(rgb, width: n, height: n, whiteBalance: [1, 1, 1])
+        let out = ColorCleanup.clean(rgb.map { Float16($0) }, width: n, height: n, whiteBalance: [1, 1, 1])
         let r = Float(out[i]), g = Float(out[i + 1]), b = Float(out[i + 2])
         XCTAssertEqual(r, g, accuracy: 0.01)
         XCTAssertEqual(g, b, accuracy: 0.01)
@@ -169,7 +169,7 @@ final class HDRMergerTests: XCTestCase {
                 rgb[(y * n + x) * 3 + 2] = 0.2
             }
         }
-        let out = ColorCleanup.clean(rgb, width: n, height: hh, whiteBalance: [1, 1, 1])
+        let out = ColorCleanup.clean(rgb.map { Float16($0) }, width: n, height: hh, whiteBalance: [1, 1, 1])
         for y in 5..<hh / 2 {
             for x in 0..<n {
                 let a = (y * n + x) * 3, b = ((hh - y) * n + x) * 3

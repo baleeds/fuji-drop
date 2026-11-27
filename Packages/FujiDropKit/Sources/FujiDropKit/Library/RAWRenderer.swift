@@ -42,28 +42,32 @@ public enum RAWRenderer {
         return cg
     }
 
-    /// Sets `filter.exposure` so a small draft render's overall brightness matches
-    /// `reference`. Two passes, since the tone curve makes the first estimate approximate.
-    /// A few milliseconds; leaves the filter at full size for the real render.
-    static func matchExposure(_ filter: CIRAWFilter, to reference: CGImage) {
-        guard let target = GrayImage(reference, maxSide: 256) else { return }
+    /// Sets `filter.exposure` so a small render's overall brightness matches `reference`, and
+    /// returns it. Several passes, since the tone curve makes each estimate approximate; the
+    /// result is clamped to `range` against a wild estimate (e.g. a reference that isn't this
+    /// frame). A few milliseconds; leaves the filter at full size for the real render.
+    /// `draft` speeds up RAF demosaicing; leave it off for our own DNGs.
+    @discardableResult
+    static func matchExposure(_ filter: CIRAWFilter, to reference: CGImage, passes: Int = 2,
+                              range: ClosedRange<Float> = -2...4, draft: Bool = true) -> Float {
+        guard let target = GrayImage(reference, maxSide: 256) else { return filter.exposure }
         let fullScale = filter.scaleFactor
-        filter.isDraftModeEnabled = true
+        filter.isDraftModeEnabled = draft
         filter.scaleFactor = Float(256 / max(filter.nativeSize.width, filter.nativeSize.height, 1))
         defer {
             filter.isDraftModeEnabled = false
             filter.scaleFactor = fullScale
         }
         var ev: Float = 0
-        for _ in 0..<2 {
+        for _ in 0..<passes {
             filter.exposure = ev
             guard let small = filter.outputImage,
                   let cg = context.createCGImage(small, from: small.extent),
-                  let probe = GrayImage(cg, maxSide: 256) else { return }
+                  let probe = GrayImage(cg, maxSide: 256) else { break }
             ev += Brightness.stops(toMatch: target, from: probe)
         }
-        // Guard against a wild estimate (e.g. a reference that isn't this frame).
-        filter.exposure = min(max(ev, -2), 4)
+        filter.exposure = min(max(ev, range.lowerBound), range.upperBound)
+        return filter.exposure
     }
 
     /// Writes `<basename>.JPG` next to `raw` (or into `directory`) and returns its URL.

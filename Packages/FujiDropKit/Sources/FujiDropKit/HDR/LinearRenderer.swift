@@ -53,25 +53,31 @@ public enum LinearRenderer {
         let m = cameraToSRGB(camXYZ)
         let gain = pow(2, exposure)
         let encode = sRGBTable
-        var rgba = [UInt8](repeating: 255, count: ow * oh * 4)
-        rgba.withUnsafeMutableBufferPointer { out in
-            let out = Shared(out)
-            DispatchQueue.concurrentPerform(iterations: oh) { y in
-                for x in 0..<ow {
-                    var sum = SIMD3<Float>(repeating: 0)
-                    for dy in 0..<factor {
-                        for dx in 0..<factor { sum += load((y * factor + dy) * width + x * factor + dx) }
-                    }
-                    let cam = sum / Float(factor * factor)
-                    let lin = tone(m * cam * gain, curve)
-                    let o = (y * ow + x) * 4
-                    out.value[o] = encode[index(lin.x)]
-                    out.value[o + 1] = encode[index(lin.y)]
-                    out.value[o + 2] = encode[index(lin.z)]
+        // Rendered straight into the buffer the image owns (freed with it): no copy.
+        let bytes = ow * oh * 4
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes)
+        let out = SendableBox(buffer)
+        DispatchQueue.concurrentPerform(iterations: oh) { y in
+            for x in 0..<ow {
+                var sum = SIMD3<Float>(repeating: 0)
+                for dy in 0..<factor {
+                    for dx in 0..<factor { sum += load((y * factor + dy) * width + x * factor + dx) }
                 }
+                let cam = sum / Float(factor * factor)
+                let lin = tone(m * cam * gain, curve)
+                let o = (y * ow + x) * 4
+                out.value[o] = encode[index(lin.x)]
+                out.value[o + 1] = encode[index(lin.y)]
+                out.value[o + 2] = encode[index(lin.z)]
+                out.value[o + 3] = 255
             }
         }
-        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        guard let provider = CGDataProvider(dataInfo: nil, data: buffer, size: bytes, releaseData: { _, data, _ in
+            data.deallocate()
+        }) else {
+            buffer.deallocate()
+            return nil
+        }
         return CGImage(width: ow, height: oh, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: ow * 4,
                        space: CGColorSpace(name: CGColorSpace.sRGB)!,
                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),

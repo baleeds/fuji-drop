@@ -328,12 +328,6 @@ public final class CameraSession: NSObject, ObservableObject {
     }
 }
 
-/// Carries a non-Sendable value (e.g. a metadata dictionary) across the callback boundary.
-struct SendableBox<T>: @unchecked Sendable {
-    let value: T
-    init(_ value: T) { self.value = value }
-}
-
 /// Resumes a continuation exactly once, from whichever thread gets there first.
 private final class ResumeOnce<T>: @unchecked Sendable {
     private let lock = NSLock()
