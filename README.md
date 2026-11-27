@@ -57,13 +57,17 @@ cd Packages/FujiDropKit && swift test
 If check 1 fails outright, the fallback is an SD card reader through the Files picker; the rest
 of the plan is unchanged.
 
+## Build checks
+
+Every push runs `.github/workflows/build.yml` on a GitHub macOS runner: generates the
+project, runs the FujiDropKit unit tests, and builds both apps for iOS (unsigned).
+
 ## Not verified yet
 
-This code was written without a Mac, so **none of it has been compiled**. Expect small
-fixes when you first build. API names most likely to need adjusting:
+Everything compiles, but nothing has run against a real camera. Runtime questions the spike
+should answer:
 
-- `ICDeviceBrowser.browsedDeviceTypeMask` mask construction
-- `ICCameraDevice.requestSendPTPCommand(_:outData:completion:)`: the order of the two `Data`
-  arguments in the completion (the code detects which one is the response container either way)
-- Whether the PTP command needs our transaction ID or ImageCaptureCore rewrites it
+- Whether iOS allows `requestSendPTPCommand` at all (it may fail with not-authorized)
+- The order of the two `Data` values in its completion (the code detects the response container either way)
+- Whether ImageCaptureCore rewrites the PTP transaction ID or uses ours
 - iOS 27 `originalResourceChoice` is left as a TODO in `PhotoSaver` until checked against the SDK

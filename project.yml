@@ -33,6 +33,7 @@ targetTemplates:
       base:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UIRequiresFullScreen: YES
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Fuji Drop saves your picks to Photos as RAW+JPEG and reads them back to check they paired."
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Fuji Drop saves your picks to Photos."
 
