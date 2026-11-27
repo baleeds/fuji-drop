@@ -1,0 +1,20 @@
+name: Demosaic compare
+
+# Renders RAF crops with Apple's RAW pipeline (macOS only) for the X-Trans demosaic study.
+on:
+  push:
+    paths: ['tools/demosaic-compare/**']
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Render crops with Core Image
+        run: swift tools/demosaic-compare/AppleRender.swift tools/demosaic-compare/crops.json out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-crops
+          path: out/*.png

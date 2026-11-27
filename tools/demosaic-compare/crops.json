@@ -1,0 +1,14 @@
+{
+  "size": 640,
+  "samples": [
+    {"name": "xt1-village", "url": "https://raw.pixls.us/download/data/Fujifilm/X-T1/20171229_110916.RAF",
+     "crops": [{"id": "forest", "x": 0.12, "y": 0.57}, {"id": "branches", "x": 0.94, "y": 0.61},
+               {"id": "chalet", "x": 0.625, "y": 0.70}, {"id": "slope", "x": 0.45, "y": 0.47}]},
+    {"name": "xe2-birches", "url": "https://raw.pixls.us/download/data/Fujifilm/X-E2/DSCF9050.RAF",
+     "crops": [{"id": "twigs", "x": 0.30, "y": 0.12}, {"id": "grass", "x": 0.12, "y": 0.78},
+               {"id": "trunks", "x": 0.50, "y": 0.30}]},
+    {"name": "xe2s-coast", "url": "https://raw.pixls.us/download/data/Fujifilm/X-E2S/_DSF0540.RAF",
+     "crops": [{"id": "house", "x": 0.72, "y": 0.42}, {"id": "rocks", "x": 0.26, "y": 0.51},
+               {"id": "trees", "x": 0.40, "y": 0.47}]}
+  ]
+}
