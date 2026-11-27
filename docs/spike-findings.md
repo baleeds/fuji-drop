@@ -16,7 +16,8 @@ Camera capabilities reported: `ICCameraDeviceSupportsHEIF`, `ICCameraDeviceCanDe
 **Full RAF download:** 33.3 MB in 1.41 s (23.6 MB/s), near the X-T1's USB 2.0 ceiling. Fetching the
 top 3 candidates of a moment for full-size comparison costs about 4 s.
 
-**Still to measure:** on-phone JPEG render time for RAW-only shots.
+**On-phone JPEG render (RAW-only shot):** `CIRAWFilter` → 4896×3264 sRGB JPEG, 3.1 MB, in 1.35 s.
+With the 1.4 s RAF download, saving a RAW-only pick to Photos takes about 3 s end to end.
 
 ## Implications
 
@@ -25,8 +26,9 @@ top 3 candidates of a moment for full-size comparison costs about 4 s.
   1920×1280 embedded RAF preview (partial read) for grouping and automatic ranking of every shot.
 - **Close calls:** for the top 2–3 candidates in a moment, download the full RAF and compare true 100%
   crops (decoded with `CIRAWFilter`). The picked RAF is downloaded anyway for saving.
-- **Saving RAW-only shots:** Photos pairing works, but with no in-camera JPEG the app must render one
-  (embedded preview or `CIRAWFilter`) or save the RAF alone. Decide after the preview test.
+- **Saving RAW-only shots (decided):** render a full-resolution JPEG from the RAF on the phone
+  (`RAWRenderer`, Apple's default RAW look, sRGB, RAF EXIF copied) and save it paired with the RAF.
+  Uses the in-camera JPEG when one exists. Fuji film-simulation looks are not reproduced.
 - **Clock:** drop clock sync. To line photos up with iPhone locations, estimate the camera's offset
   instead (e.g. compare an X-T1 shot with an iPhone shot of the same moment).
 - **Catalog speed:** show files as they arrive rather than waiting for the full catalog. Re-measure
