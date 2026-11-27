@@ -242,8 +242,10 @@ final class SpikeModel: ObservableObject {
             let resources = PhotoSaver.resources(forAssetID: id)
             let listing = resources.map(\.description).joined(separator: "; ")
             let paired = resources.contains { $0.type == .photo } && resources.contains { $0.type == .alternatePhoto }
-            set(3, paired ? .pass : .fail,
-                "\(timing). Asset resources: \(listing.isEmpty ? "none found" : listing). Check Photos shows a single RAW+JPEG item with the right date and colors.")
+            let base = PhotoSaver.editingBase(forAssetID: id)
+            camera.record("Saved \(shot.basename): editing base \(base)")
+            set(3, paired && base == "RAW" ? .pass : .info,
+                "\(timing). Asset resources: \(listing.isEmpty ? "none found" : listing). Editing base: \(base). In Photos, Edit should work from the RAW.")
         } catch {
             set(3, .fail, "Failed: \(error.localizedDescription)")
         }

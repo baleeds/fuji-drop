@@ -37,7 +37,8 @@ public enum PhotoSaver {
         jpeg: URL,
         raw: URL?,
         creationDate: Date? = nil,
-        location: CLLocation? = nil
+        location: CLLocation? = nil,
+        rawIsEditingBase: Bool = true
     ) async throws -> String {
         let status = await requestAccess()
         guard status == .authorized || status == .limited else { throw SaveError.notAuthorized(status) }
@@ -61,8 +62,14 @@ public enum PhotoSaver {
                 request.addResource(with: .alternatePhoto, fileURL: raw, options: rawOptions)
             }
 
-            // TODO(iOS 27): set `originalResourceChoice` so the RAF is the unadjusted base for edits.
-            // Check the exact API in the iOS 27 SDK before enabling.
+            // Make the RAF the unadjusted base, so edits in Photos start from RAW data.
+            // Only valid when both resources are present. iOS 27 SDK only: the compiler check
+            // keeps the code out of builds with older Xcode (the CI runners lack the iOS 27 SDK).
+            #if compiler(>=6.4)
+            if raw != nil, rawIsEditingBase, #available(iOS 27, *) {
+                request.originalResourceChoice = .raw
+            }
+            #endif
 
             if let creationDate { request.creationDate = creationDate }
             if let location { request.location = location }
@@ -81,6 +88,23 @@ public enum PhotoSaver {
         return PHAssetResource.assetResources(for: asset).map {
             SavedResource(type: $0.type, filename: $0.originalFilename, uti: $0.uniformTypeIdentifier)
         }
+    }
+
+    /// Which resource Photos uses as the editing base for a saved asset, for verification.
+    public static func editingBase(forAssetID id: String) -> String {
+        #if compiler(>=6.4)
+        guard #available(iOS 27, *) else { return "unknown (needs iOS 27)" }
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else {
+            return "asset not found"
+        }
+        switch asset.originalResourceChoice {
+        case .raw: return "RAW"
+        case .compressed: return "JPEG"
+        @unknown default: return "other"
+        }
+        #else
+        return "unknown (built without the iOS 27 SDK)"
+        #endif
     }
 
     public static func name(of type: PHAssetResourceType) -> String {
