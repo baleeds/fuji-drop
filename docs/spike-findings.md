@@ -28,7 +28,11 @@ With the 1.4 s RAF download, saving a RAW-only pick to Photos takes about 3 s en
   crops (decoded with `CIRAWFilter`). The picked RAF is downloaded anyway for saving.
 - **Saving RAW-only shots (decided):** render a full-resolution JPEG from the RAF on the phone
   (`RAWRenderer`, Apple's default RAW look, sRGB, RAF EXIF copied) and save it paired with the RAF.
-  Uses the in-camera JPEG when one exists. Fuji film-simulation looks are not reproduced.
+  Uses the in-camera JPEG when one exists. Fuji film-simulation looks are not reproduced, which is
+  fine: the owner edits from RAW (Capture One / Photos), so the JPEG is only a share fallback.
+- **RAW is the editing base (iOS 27):** saving sets `originalResourceChoice = .raw`. Confirmed in
+  Photos: assets saved this way are labelled **RAW+JPEG**; without it they show **JPEG+RAW**
+  (JPEG as original). Guarded by `#if compiler(>=6.4)` since CI runners only have the iOS 26.5 SDK.
 - **Clock:** drop clock sync. To line photos up with iPhone locations, estimate the camera's offset
   instead (e.g. compare an X-T1 shot with an iPhone shot of the same moment).
 - **Catalog speed:** show files as they arrive rather than waiting for the full catalog. Re-measure
