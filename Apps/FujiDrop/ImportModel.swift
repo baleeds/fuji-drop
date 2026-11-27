@@ -5,6 +5,10 @@ import UIKit
 
 /// Import pipeline for the main app: camera catalog → shooting days → embedded RAF previews
 /// (cached on disk) → thumbnails + Vision feature prints → moments.
+///
+/// Previews load through one serial queue (the camera answers one read at a time). On connect
+/// it loads a few spread-out samples per day for the days list; opening a day moves that day's
+/// shots to the front.
 @MainActor
 final class ImportModel: ObservableObject {
     struct Shot: Identifiable {
@@ -15,18 +19,22 @@ final class ImportModel: ObservableObject {
         var thumbnail: UIImage?
         var print: FeaturePrint?
         var error: String?
+
+        var isProcessed: Bool { thumbnail != nil || error != nil }
     }
 
     struct Day: Identifiable, Hashable {
         let id: String
         let date: Date?
-        let shotIDs: [String]
+        let shotIDs: [String]       // time order
+        let sampleIDs: [String]     // spread across the day
 
         var title: String {
-            let when = date.map { $0.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()) } ?? "Undated"
-            return "\(when) · \(shotIDs.count) shots"
+            date.map { $0.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()) } ?? "Undated"
         }
     }
+
+    static let samplesPerRow = 4
 
     let camera = CameraSession()
     private let cache = PreviewCache()
@@ -37,23 +45,23 @@ final class ImportModel: ObservableObject {
     /// Shots of the selected day in time order (filename breaks ties within a second).
     @Published private(set) var order: [String] = []
     @Published private(set) var moments: [[String]] = []
-    @Published private(set) var previewsLoaded = 0
-    /// When preview reading for the selected day started, and how many were already done then.
-    private var previewStart: (date: Date, alreadyLoaded: Int)?
     @Published private(set) var cacheUsage = PreviewCache.Usage(files: 0, bytes: 0)
     @Published private(set) var skippedNonRAW = 0
     @Published var grouper = MomentGrouper() {
         didSet { if grouper != oldValue { regroup() } }
     }
 
-    private var loadTask: Task<Void, Never>?
+    /// When preview reading for the selected day started, and how many were already done then.
+    private var previewStart: (date: Date, alreadyDone: Int)?
+    private var queue: [String] = []
+    private var worker: Task<Void, Never>?
     private var distanceCache: [String: Float] = [:]
-
-    // MARK: Catalog → days
 
     init() {
         pruneCache()
     }
+
+    // MARK: Catalog → days
 
     func catalogReady() {
         let pairs = camera.shots
@@ -64,44 +72,86 @@ final class ImportModel: ObservableObject {
         shots = Dictionary(uniqueKeysWithValues: rawShots.map { ($0.id, $0) })
 
         days = DayGrouping.group(rawShots, date: \.date).map { group in
-            let ids = group.items
+            let sorted = group.items
                 .sorted { ($0.date ?? .distantPast, $0.id) < ($1.date ?? .distantPast, $1.id) }
-                .map(\.id)
             let key = group.day.map { String(Int($0.timeIntervalSince1970)) } ?? "undated"
-            return Day(id: key, date: group.day, shotIDs: ids)
+            return Day(id: key, date: group.day, shotIDs: sorted.map(\.id),
+                       sampleIDs: TimeSampling.spread(sorted, count: Self.samplesPerRow, date: \.date).map(\.id))
         }
         let undated = rawShots.filter { $0.date == nil }.count
         camera.record("Import: \(rawShots.count) RAW shots over \(days.count) days; \(undated) undated, \(skippedNonRAW) non-RAW skipped.")
-        if let newest = days.first { select(dayID: newest.id) }
+
+        // Day-row samples first, newest day first.
+        enqueue(days.flatMap(\.sampleIDs), atFront: false)
     }
 
     func reset() {
-        loadTask?.cancel()
+        worker?.cancel()
+        worker = nil
+        queue = []
         days = []; selectedDayID = nil; shots = [:]; order = []; moments = []
-        previewsLoaded = 0; distanceCache = [:]
+        previewStart = nil; distanceCache = [:]
     }
 
     // MARK: Day → previews
 
     func select(dayID: String) {
         guard let day = days.first(where: { $0.id == dayID }) else { return }
-        loadTask?.cancel()
         selectedDayID = dayID
         order = day.shotIDs
-        previewsLoaded = order.filter { shots[$0]?.thumbnail != nil || shots[$0]?.error != nil }.count
-        previewStart = (Date(), previewsLoaded)
+        previewStart = (Date(), dayProcessed)
         regroup()
-        let ids = order
-        loadTask = Task { [weak self] in
-            for id in ids {
-                if Task.isCancelled { return }
-                await self?.loadPreview(id)
+        enqueue(order, atFront: true)
+    }
+
+    /// Selected day's shots that have a thumbnail (or failed).
+    var dayProcessed: Int { order.filter { shots[$0]?.isProcessed == true }.count }
+
+    /// Rough time left for the selected day's previews, once there's enough to estimate from.
+    var previewTimeRemaining: TimeInterval? {
+        guard let start = previewStart else { return nil }
+        let done = dayProcessed - start.alreadyDone
+        let left = order.count - dayProcessed
+        guard done >= 5, left > 0 else { return nil }
+        return Date().timeIntervalSince(start.date) / Double(done) * Double(left)
+    }
+
+    func dayTimeSpan(_ day: Day) -> String? {
+        guard let first = day.shotIDs.first.flatMap({ shots[$0]?.date }),
+              let last = day.shotIDs.last.flatMap({ shots[$0]?.date }) else { return nil }
+        let a = first.formatted(date: .omitted, time: .shortened)
+        let b = last.formatted(date: .omitted, time: .shortened)
+        return a == b ? a : "\(a) – \(b)"
+    }
+
+    /// Up to `count` ids spread across the given shots' time span.
+    func samples(of ids: [String], count: Int = ImportModel.samplesPerRow) -> [String] {
+        TimeSampling.spread(ids, count: count, date: { self.shots[$0]?.date })
+    }
+
+    // MARK: Preview queue
+
+    private func enqueue(_ ids: [String], atFront: Bool) {
+        let wanted = ids.filter { shots[$0]?.isProcessed == false }
+        let set = Set(wanted)
+        queue.removeAll { set.contains($0) }
+        queue = atFront ? wanted + queue : queue + wanted
+        guard worker == nil else { return }
+        worker = Task { [weak self] in
+            while let self, !Task.isCancelled, let id = self.nextQueued() {
+                await self.loadPreview(id)
             }
+            self?.worker = nil
+            self?.refreshCacheUsage()
         }
     }
 
+    private func nextQueued() -> String? {
+        queue.isEmpty ? nil : queue.removeFirst()
+    }
+
     private func loadPreview(_ id: String) async {
-        guard let shot = shots[id], shot.thumbnail == nil, shot.error == nil else { return }
+        guard let shot = shots[id], !shot.isProcessed, shot.previewURL == nil else { return }
         let size = Int64(shot.raw.fileSize)
         do {
             let url: URL
@@ -125,7 +175,6 @@ final class ImportModel: ObservableObject {
         } catch {
             shots[id]?.error = error.localizedDescription
             camera.record("Preview \(id) failed: \(error.localizedDescription)")
-            previewsLoaded += 1
         }
     }
 
@@ -133,18 +182,7 @@ final class ImportModel: ObservableObject {
         shots[id]?.thumbnail = thumbnail.map { UIImage(cgImage: $0) }
         shots[id]?.print = print
         if thumbnail == nil { shots[id]?.error = "Could not decode preview" }
-        previewsLoaded += 1
-        if previewsLoaded == order.count { refreshCacheUsage() }
-        regroup()
-    }
-
-    /// Rough time left for the selected day's previews, once there's enough to estimate from.
-    var previewTimeRemaining: TimeInterval? {
-        guard let start = previewStart else { return nil }
-        let done = previewsLoaded - start.alreadyLoaded
-        let left = order.count - previewsLoaded
-        guard done >= 5, left > 0 else { return nil }
-        return Date().timeIntervalSince(start.date) / Double(done) * Double(left)
+        if order.contains(id) { regroup() }
     }
 
     // MARK: Preview cache

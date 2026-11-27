@@ -39,3 +39,8 @@ With the 1.4 s RAF download, saving a RAW-only pick to Photos takes about 3 s en
   a cold connection (new shots, camera power-cycled).
 - **ImageCaptureCore callbacks can fire more than once** (seen with `resetControlAuthorization`).
   Every callback goes through a resume-once helper with a timeout.
+
+## Main app feedback
+
+- **Moment grouping defaults confirmed** on the owner's own days: burst gap 3 s, split above Δ 0.6,
+  join gap 180 s, join below Δ 0.3 (Vision feature print, current revision). No change needed.

@@ -12,20 +12,19 @@ struct ImportView: View {
     }
 }
 
-/// Identifies a moment for navigation by its shot IDs.
-struct MomentRef: Hashable {
-    let ids: [String]
-}
+/// Navigation values.
+struct DayRef: Hashable { let id: String }
+struct MomentRef: Hashable { let ids: [String] }
 
 private struct ImportContent: View {
     @ObservedObject var model: ImportModel
     @ObservedObject var camera: CameraSession
-    @State private var showTuning = false
+    @State private var showSettings = false
 
     var body: some View {
         Group {
             if camera.catalogComplete {
-                momentsList
+                DaysList(model: model)
             } else {
                 ConnectView(camera: camera) { Task { await camera.start() } }
             }
@@ -39,37 +38,82 @@ private struct ImportContent: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showTuning = true } label: { Image(systemName: "slider.horizontal.3") }
-                        .accessibilityLabel("Grouping settings")
+                    SettingsButton(showSettings: $showSettings)
                 }
             }
         }
         .onChange(of: camera.catalogComplete) {
             if camera.catalogComplete { model.catalogReady() }
         }
-        .sheet(isPresented: $showTuning) {
+        .sheet(isPresented: $showSettings) {
             TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, clearCache: model.clearCache)
                 .presentationDetents([.medium, .large])
+        }
+        .navigationDestination(for: DayRef.self) { ref in
+            MomentsView(model: model, dayID: ref.id, showSettings: $showSettings)
         }
         .navigationDestination(for: MomentRef.self) { ref in
             MomentDetailView(model: model, ids: ref.ids)
         }
     }
+}
 
-    private var momentsList: some View {
+private struct SettingsButton: View {
+    @Binding var showSettings: Bool
+    var body: some View {
+        Button { showSettings = true } label: { Image(systemName: "slider.horizontal.3") }
+            .accessibilityLabel("Settings")
+    }
+}
+
+// MARK: - Days
+
+private struct DaysList: View {
+    @ObservedObject var model: ImportModel
+
+    var body: some View {
         List {
             Section {
-                if !model.days.isEmpty {
-                    Picker("Day", selection: Binding(
-                        get: { model.selectedDayID ?? "" },
-                        set: { model.select(dayID: $0) }
-                    )) {
-                        ForEach(model.days) { Text($0.title).tag($0.id) }
+                ForEach(model.days) { day in
+                    NavigationLink(value: DayRef(id: day.id)) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(day.title).font(.headline)
+                                Spacer()
+                                Text(day.shotIDs.count == 1 ? "1 shot" : "\(day.shotIDs.count) shots")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let span = model.dayTimeSpan(day) {
+                                Text(span).font(.caption).foregroundStyle(.secondary)
+                            }
+                            ThumbStrip(model: model, ids: day.sampleIDs, total: day.shotIDs.count)
+                        }
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
                     }
                 }
-                if model.previewsLoaded < model.order.count {
-                    ProgressView(value: Double(model.previewsLoaded), total: Double(max(model.order.count, 1))) {
-                        Text("Reading previews \(model.previewsLoaded) of \(model.order.count)")
+            } footer: {
+                if model.skippedNonRAW > 0 {
+                    Text("\(model.skippedNonRAW) non-RAW files skipped")
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Moments of one day
+
+private struct MomentsView: View {
+    @ObservedObject var model: ImportModel
+    let dayID: String
+    @Binding var showSettings: Bool
+
+    var body: some View {
+        List {
+            Section {
+                if model.dayProcessed < model.order.count {
+                    ProgressView(value: Double(model.dayProcessed), total: Double(max(model.order.count, 1))) {
+                        Text("Reading previews \(model.dayProcessed) of \(model.order.count)")
                             .font(.subheadline)
                     } currentValueLabel: {
                         if let left = model.previewTimeRemaining {
@@ -78,8 +122,7 @@ private struct ImportContent: View {
                     }
                 }
             } footer: {
-                Text("\(model.moments.count) moments from \(model.order.count) shots"
-                     + (model.skippedNonRAW > 0 ? " · \(model.skippedNonRAW) non-RAW files skipped" : ""))
+                Text("\(model.moments.count) moments from \(model.order.count) shots")
             }
 
             ForEach(model.moments, id: \.first) { ids in
@@ -88,6 +131,10 @@ private struct ImportContent: View {
                 }
             }
         }
+        .navigationTitle(model.days.first { $0.id == dayID }?.title ?? "")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { SettingsButton(showSettings: $showSettings) }
+        .onAppear { if model.selectedDayID != dayID { model.select(dayID: dayID) } }
     }
 }
 
@@ -161,19 +208,10 @@ private struct MomentRow: View {
                 Text(ids.count == 1 ? "1 shot" : "\(ids.count) shots")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 4) {
-                    ForEach(ids.prefix(12), id: \.self) { id in
-                        ShotThumbnail(shot: model.shots[id], height: 56)
-                    }
-                    if ids.count > 12 {
-                        Text("+\(ids.count - 12)").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 6)
-                    }
-                }
-            }
-            .frame(height: 56)
+            ThumbStrip(model: model, ids: model.samples(of: ids), total: ids.count)
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     private var timeText: String {
@@ -187,19 +225,51 @@ private struct MomentRow: View {
     }
 }
 
+/// A fixed row of sample thumbnails plus "+N". Not scrollable, so the whole row stays tappable.
+struct ThumbStrip: View {
+    @ObservedObject var model: ImportModel
+    let ids: [String]
+    let total: Int
+    var cell = CGSize(width: 64, height: 48)
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(ids, id: \.self) { id in
+                ShotThumbnail(shot: model.shots[id], height: cell.height, fillWidth: cell.width)
+            }
+            if total > ids.count {
+                Text("+\(total - ids.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 4)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(height: cell.height)
+    }
+}
+
 struct ShotThumbnail: View {
     let shot: ImportModel.Shot?
     let height: CGFloat
+    /// When set, the image fills a fixed-width cell (cropped); otherwise it keeps its aspect ratio.
+    var fillWidth: CGFloat? = nil
 
     var body: some View {
+        let width = fillWidth ?? height * 1.5
         Group {
             if let image = shot?.thumbnail {
-                Image(uiImage: image).resizable().scaledToFit()
+                if fillWidth != nil {
+                    Image(uiImage: image).resizable().scaledToFill()
+                        .frame(width: width, height: height).clipped()
+                } else {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
             } else if shot?.error != nil {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                    .frame(width: height * 1.5)
+                    .frame(width: width, height: height)
             } else {
-                Rectangle().fill(.quaternary).frame(width: height * 1.5)
+                Rectangle().fill(.quaternary).frame(width: width, height: height)
             }
         }
         .frame(height: height)
