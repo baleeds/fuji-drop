@@ -3,7 +3,7 @@ import Foundation
 import Photos
 import UIKit
 
-/// Saves picks to Photos one at a time in the background: get the RAF (shared with
+/// Saves selections to Photos one at a time in the background: get the RAF (shared with
 /// compare's cache), render a full-size JPEG on the phone, then save both as one RAW+JPEG
 /// asset with the RAF as the editing base. About 3 s per pick; less if compare already
 /// downloaded and decoded the RAF. The next pick's RAF downloads while this one renders.
@@ -73,33 +73,55 @@ final class SaveQueue: ObservableObject {
     /// The model owns this queue and resets it before going away.
     private unowned let model: ImportModel
     private var pending: [Item] = []
+    /// Keys being saved right now, across runs: a stopped run may still be finishing one, and
+    /// it mustn't be queued (and saved) again meanwhile.
+    private var inFlight: Set<String> = []
     private var worker: Task<Void, Never>?
+    private var prefetch: Task<Void, Never>?
+    /// Bumped whenever a run is stopped or replaced; a run that finishes late only touches
+    /// state if it's still current.
+    private var generation = 0
 
     init(model: ImportModel) {
         self.model = model
     }
 
-    /// Queues the given picks (skipping ones already saved or queued) and starts saving.
+    /// Queues the given selections (skipping ones saved, queued or being saved) and starts.
     func save(_ ids: [String]) {
         let items = ids.compactMap { id -> Item? in
-            guard let shot = model.shots[id], !model.isSaved(id) else { return nil }
+            guard let shot = model.shots[id], !model.isSaved(id), !inFlight.contains(shot.key) else { return nil }
             return Item(id: id, key: shot.key)
         }
         .filter { !pending.contains($0) }
         guard !items.isEmpty else { return }
-
-        if progress?.state == .running {
-            progress?.total += items.count
-        } else {
-            progress = Progress(total: items.count)
-        }
         pending += items
+
+        switch progress?.state {
+        case .running:
+            progress?.total += items.count
+        case .blocked:
+            progress?.total = (progress?.done ?? 0) + pending.count
+        default:
+            // Count everything still to do, including items a blocked run left behind.
+            progress = Progress(total: pending.count)
+        }
         startIfNeeded()
     }
 
-    /// Stops after the current photo; the rest stay unsaved.
+    /// Drops a deselected, unsaved frame from the queue.
+    func unqueue(key: String) {
+        // Already being written: it'll land in Photos (and be selected again) regardless.
+        guard !inFlight.contains(key), let index = pending.firstIndex(where: { $0.key == key }) else { return }
+        pending.remove(at: index)
+        progress?.total -= 1
+        if progress?.total == progress?.done, progress?.state == .running {
+            progress?.state = .finished
+        }
+    }
+
+    /// Stops after the current photo; the rest stay unsaved (and selected).
     func cancel() {
-        worker?.cancel()
+        stopRun()
         pending = []
         if progress?.state == .running { progress?.state = .stopped }
     }
@@ -119,82 +141,109 @@ final class SaveQueue: ObservableObject {
 
     func dismiss() {
         guard progress?.state != .running else { return }
+        if progress?.state == .blocked { pending = [] }
         progress = nil
     }
 
     /// The session ended: drop everything (saved photos stay saved).
     func reset() {
-        worker?.cancel()
-        worker = nil
+        stopRun()
         pending = []
         progress = nil
     }
 
     // MARK: Work
 
+    private func stopRun() {
+        generation += 1
+        worker?.cancel()
+        worker = nil
+        prefetch?.cancel()
+        prefetch = nil
+    }
+
     private func startIfNeeded() {
         guard worker == nil, progress?.state == .running, !pending.isEmpty else { return }
+        generation += 1
+        let run = generation
         worker = Task { [weak self] in
-            await self?.run()
-            self?.worker = nil
-            // Items queued while a stopped run was winding down.
-            self?.startIfNeeded()
+            await self?.run(run)
+            guard let self, self.generation == run else { return }
+            self.worker = nil
+            self.startIfNeeded()
         }
     }
 
-    private func run() async {
-        while !Task.isCancelled, let item = pending.first {
+    private func run(_ run: Int) async {
+        while !Task.isCancelled, generation == run, let item = pending.first {
             progress?.current = model.shots[item.id]?.thumbnail
+            inFlight.insert(item.key)
+            var failure: String?
             do {
                 try await save(item)
             } catch PhotoSaver.SaveError.notAuthorized {
+                inFlight.remove(item.key)
+                guard generation == run else { return }
                 // Nothing else will save either; keep the queue for after it's allowed.
                 progress?.state = .blocked
                 progress?.current = nil
                 model.camera.record("Save: Photos access not granted.")
                 return
             } catch is CancellationError {
-                break
+                inFlight.remove(item.key)
+                return
             } catch {
-                progress?.failures.append(Failure(id: item.id, reason: error.localizedDescription))
+                failure = error.localizedDescription
                 model.camera.record("Save \(item.id) failed: \(error.localizedDescription)")
             }
+            inFlight.remove(item.key)
+            // A stopped or replaced run doesn't touch the new run's queue or counts.
+            guard generation == run else { return }
+            if let failure { progress?.failures.append(Failure(id: item.id, reason: failure)) }
             pending.removeAll { $0 == item }
             progress?.done += 1
         }
+        guard generation == run else { return }
         progress?.current = nil
-        // Finished only if nothing new was queued (a cancelled run may be winding down while a
-        // new save starts).
         if progress?.state == .running, pending.isEmpty { progress?.state = .finished }
     }
 
     private func save(_ item: Item) async throws {
+        // Saved meanwhile (e.g. by a stopped run finishing it): nothing to do.
+        guard !model.isSaved(item.id) || model.shots[item.id]?.key != item.key else { return }
         let started = Date()
         // Waits out an unplug; nil means it failed or the file is gone.
-        guard let raw = await model.rawURL(item.id) else {
+        guard let cached = await model.rawURL(item.id) else {
             try Task.checkCancellation()
             throw model.shots[item.id]?.key == item.key ? SaveError.downloadFailed : SaveError.notOnCard
         }
         try Task.checkCancellation()
         guard let shot = model.shots[item.id], shot.key == item.key else { throw SaveError.notOnCard }
 
-        // Fetch the next pick's RAF while this one renders (camera and CPU in parallel).
-        if let next = pending.dropFirst().first {
-            Task { [model] in _ = await model.rawURL(next.id) }
-        }
-
-        // Render the full-size JPEG off the main actor, in its own folder, reusing compare's
-        // decode when there is one.
-        let decoded = PreviewImageLoader.shared.cachedFullResolution(raw: raw)?.cgImage
+        // Work from a hard link in our own folder: the RAF cache keeps only a few files and
+        // other downloads may prune this one mid-save. Same name, so Photos gets DSCF1234.RAF.
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("Renders", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let raw = folder.appendingPathComponent(cached.lastPathComponent)
+        do {
+            try FileManager.default.linkItem(at: cached, to: raw)
+        } catch {
+            try FileManager.default.copyItem(at: cached, to: raw)
+        }
+
+        // Fetch the next selection's RAF while this one renders (camera and CPU in parallel).
+        prefetch?.cancel()
+        if let next = pending.dropFirst().first {
+            prefetch = Task { [model] in _ = await model.rawURL(next.id) }
+        }
+
+        // Render the full-size JPEG off the main actor, reusing compare's decode if any.
+        let decoded = PreviewImageLoader.shared.cachedFullResolution(raw: cached)?.cgImage
         let jpeg = try await Background.raw { () -> Result<URL, Error> in
-            Result {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                return try RAWRenderer.renderJPEG(from: raw, image: decoded, into: folder)
-            }
+            Result { try RAWRenderer.renderJPEG(from: raw, image: decoded, into: folder) }
         }.get()
         try Task.checkCancellation()
 

@@ -32,7 +32,7 @@ struct SaveBar: View {
             // A clean run hides itself; failures stay until dismissed or retried.
             .task(id: p.phase) {
                 guard p.phase == .done else { return }
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(3))
                 if !Task.isCancelled { saves.dismiss() }
             }
         }

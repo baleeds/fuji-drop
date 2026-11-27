@@ -39,12 +39,18 @@ struct ZoomableImage: UIViewRepresentable {
     var group: ZoomGroup?
     /// Maximum zoom over fit. Panes in one group should share it so they stay in step.
     var maxZoom: CGFloat = 4
+    /// Horizontal swipe while not zoomed in: +1 for next (swipe left), -1 for previous.
+    var onSwipe: ((Int) -> Void)?
 
     func makeUIView(context: Context) -> ZoomingScrollView {
         ZoomingScrollView(image: image, group: group, maxZoom: maxZoom)
     }
 
-    func updateUIView(_ view: ZoomingScrollView, context: Context) { view.setImage(image) }
+    func updateUIView(_ view: ZoomingScrollView, context: Context) {
+        view.setImage(image)
+        view.maximumZoomScale = maxZoom
+        view.onSwipe = onSwipe
+    }
 }
 
 final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
@@ -53,6 +59,10 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
     private var laidOutSize: CGSize = .zero
     /// Set while applying a viewport from the group, so the change isn't echoed back.
     private var applying = false
+    var onSwipe: ((Int) -> Void)?
+    private let swipeLeft = UISwipeGestureRecognizer()
+    private let swipeRight = UISwipeGestureRecognizer()
+    private let swipeDelegate = SwipeDelegate()
 
     init(image: UIImage, group: ZoomGroup?, maxZoom: CGFloat) {
         super.init(frame: .zero)
@@ -71,6 +81,18 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
         doubleTap.numberOfTapsRequired = 2
         addGestureRecognizer(doubleTap)
+
+        // Swipes step between frames, only at fit zoom (when zoomed, a drag pans instead).
+        swipeDelegate.shouldBegin = { [weak self] in
+            guard let self else { return false }
+            return self.onSwipe != nil && self.zoomScale <= self.minimumZoomScale + 0.01
+        }
+        for (swipe, direction) in [(swipeLeft, UISwipeGestureRecognizer.Direction.left), (swipeRight, .right)] {
+            swipe.direction = direction
+            swipe.delegate = swipeDelegate
+            swipe.addTarget(self, action: #selector(swiped(_:)))
+            addGestureRecognizer(swipe)
+        }
         group?.register(self)
     }
 
@@ -170,6 +192,10 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
         if !decelerate { report(force: true) }
     }
 
+    @objc private func swiped(_ swipe: UISwipeGestureRecognizer) {
+        onSwipe?(swipe === swipeLeft ? 1 : -1)
+    }
+
     @objc private func doubleTapped(_ tap: UITapGestureRecognizer) {
         let target: Viewport
         if zoomScale > minimumZoomScale {
@@ -183,5 +209,19 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
         }
         apply(target, animated: true)
         group?.changed(target, by: self, animated: true)
+    }
+}
+
+/// Lets the frame swipes begin only at fit zoom and run alongside the scroll view's own pan.
+private final class SwipeDelegate: NSObject, UIGestureRecognizerDelegate {
+    var shouldBegin: () -> Bool = { false }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        shouldBegin()
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
     }
 }

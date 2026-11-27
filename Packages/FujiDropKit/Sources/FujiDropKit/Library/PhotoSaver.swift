@@ -80,6 +80,21 @@ public enum PhotoSaver {
         return id
     }
 
+    /// Deletes a saved asset. iOS asks the user to confirm. Returns true if it's gone (also
+    /// when it was already deleted in Photos), false if the user kept it or it failed.
+    public static func delete(assetID: String) async -> Bool {
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        guard assets.count > 0 else { return true }
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets)
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Lists the resources Photos actually stored for an asset, to verify pairing.
     public static func resources(forAssetID id: String) -> [SavedResource] {
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else {

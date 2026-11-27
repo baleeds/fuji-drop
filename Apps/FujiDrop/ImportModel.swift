@@ -101,16 +101,17 @@ final class ImportModel: ObservableObject {
     @Published private(set) var moments: [[String]] = []
     @Published private(set) var cacheUsage = PreviewCache.Usage(files: 0, bytes: 0)
     @Published private(set) var skippedNonRAW = 0
-    /// Picked frames by `Shot.key`, so they survive reconnecting and never carry over to a
-    /// different file (or camera) that reuses a DSCF number.
+    /// Selected frames by `Shot.key` (any number per moment), so they survive reconnecting
+    /// and never carry over to a different file (or camera) that reuses a DSCF number.
     @Published private(set) var picks: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: ImportModel.picksKey) ?? [])
     private static let picksKey = "picks.v2"
-    /// Picks saved to Photos: `Shot.key` → Photos asset id. Kept so nothing saves twice.
+    /// Selections saved to Photos: `Shot.key` → Photos asset id. Kept so nothing saves twice,
+    /// and so deselecting can delete the asset.
     @Published private(set) var saved: [String: String] =
         (UserDefaults.standard.dictionary(forKey: ImportModel.savedKey) as? [String: String]) ?? [:]
     private static let savedKey = "saved.v1"
-    /// Saves picks to Photos in the background (see `SaveQueue`).
+    /// Saves selections to Photos in the background (see `SaveQueue`).
     lazy var saves = SaveQueue(model: self)
     @Published var grouper = MomentGrouper() {
         didSet { if grouper != oldValue { regroup() } }
@@ -197,6 +198,8 @@ final class ImportModel: ObservableObject {
         }
         // Day collage samples, newest day first.
         loadDaySamples()
+        // Selections whose save was cut off (unplugged, app closed) carry on.
+        saves.save(unsavedSelections())
     }
 
     /// The camera went away (unplugged, turned off). Keep the session; stop camera work.
@@ -469,8 +472,10 @@ final class ImportModel: ObservableObject {
                 for await state in $connection.values where state != .reconnecting { break }
             case .connected:
                 if let url = await download(id) { return url }
-                // Failed while still connected: a real failure. Otherwise unplugged; loop.
-                if connection == .connected { return nil }
+                // A read can fail a moment before the unplug is reported: let it settle, then
+                // a failure while still connected is real. Otherwise loop and wait.
+                try? await Task.sleep(for: .seconds(1))
+                if connection == .connected, camera.catalogComplete { return nil }
             }
         }
         return nil
@@ -583,60 +588,92 @@ final class ImportModel: ObservableObject {
         return Ranking(breakdowns: Dictionary(uniqueKeysWithValues: zip(candidates, ranked)), suggested: best)
     }
 
-    /// The frame that stands for a moment: the owner's pick, else the suggestion, else the
+    /// The frame that stands for a moment: the first selected, else the suggestion, else the
     /// middle frame that loaded (so the feed doesn't flicker or lead with a failed frame).
     func hero(of ids: [String], ranking: Ranking? = nil) -> String {
-        if let pick = picked(in: ids) ?? (ranking ?? self.ranking(of: ids))?.suggested { return pick }
+        if let pick = selected(in: ids).first ?? (ranking ?? self.ranking(of: ids))?.suggested { return pick }
         let usable = ids.filter { shots[$0]?.error == nil }
         let pool = usable.isEmpty ? ids : usable
         return pool[pool.count / 2]
     }
 
-    // MARK: Picks
+    // MARK: Selection
 
-    func isPicked(_ id: String) -> Bool {
+    func isSelected(_ id: String) -> Bool {
         shots[id].map { picks.contains($0.key) } ?? false
     }
 
-    /// The moment's picked frame, if the owner chose one.
-    func picked(in ids: [String]) -> String? {
-        ids.first(where: isPicked)
-    }
-
-    /// Makes `id` the moment's one pick (nil clears it).
-    func setPick(_ id: String?, in ids: [String]) {
-        for other in ids { if let key = shots[other]?.key { picks.remove(key) } }
-        if let id, let key = shots[id]?.key { picks.insert(key) }
-        UserDefaults.standard.set(Array(picks), forKey: Self.picksKey)
+    /// Selected frames among `ids`, in their order.
+    func selected(in ids: [String]) -> [String] {
+        ids.filter(isSelected)
     }
 
     func isSaved(_ id: String) -> Bool {
         shots[id].map { saved[$0.key] != nil } ?? false
     }
 
+    func selectionState(_ id: String) -> SelectionCircle.Kind {
+        isSaved(id) ? .saved : isSelected(id) ? .selected : .unselected
+    }
+
+    /// Selecting saves to Photos in the background. Deselecting drops an unsaved frame from
+    /// the queue, or asks iOS to delete a saved one from Photos (and stays selected if the
+    /// owner keeps it), so selection always matches what's in Photos.
+    func toggleSelection(_ id: String) {
+        guard let key = shots[id]?.key else { return }
+        guard picks.contains(key) else {
+            picks.insert(key)
+            persistPicks()
+            saves.save([id])
+            return
+        }
+        if let asset = saved[key] {
+            Task {
+                guard await PhotoSaver.delete(assetID: asset) else { return }
+                saved[key] = nil
+                UserDefaults.standard.set(saved, forKey: Self.savedKey)
+                picks.remove(key)
+                persistPicks()
+            }
+        } else {
+            picks.remove(key)
+            persistPicks()
+            saves.unqueue(key: key)
+        }
+    }
+
+    /// A save finished. Also (re)selects it: it's in Photos now, even if it was deselected
+    /// while being written.
     func markSaved(key: String, assetID: String) {
         saved[key] = assetID
         UserDefaults.standard.set(saved, forKey: Self.savedKey)
+        if picks.insert(key).inserted { persistPicks() }
     }
 
-    /// Picked frames among `ids` not yet in Photos, in time order.
-    func unsavedPicks(in ids: [String]) -> [String] {
-        ids.filter { isPicked($0) && !isSaved($0) }
+    private func persistPicks() {
+        UserDefaults.standard.set(Array(picks), forKey: Self.picksKey)
     }
 
-    /// The two frames compare opens with: the current favourite on top (pick, else suggestion,
-    /// else middle) and the best-ranked other frame (else the next frame in time) below.
-    func compareStart(in ids: [String]) -> (top: String, bottom: String) {
-        let ranking = ranking(of: ids)
-        let top = hero(of: ids, ranking: ranking)
+    /// Selected frames on the card not yet in Photos (e.g. cut off by an earlier unplug),
+    /// in time order.
+    private func unsavedSelections() -> [String] {
+        shots.values
+            .filter { picks.contains($0.key) && saved[$0.key] == nil }
+            .sorted { ($0.date ?? .distantPast, $0.id) < ($1.date ?? .distantPast, $1.id) }
+            .map(\.id)
+    }
+
+    /// The frame to compare `top` against: the best-ranked other frame, else the next one in
+    /// time. Nil for single frames.
+    func challenger(for top: String, in ids: [String], ranking: Ranking?) -> String? {
         let others = ids.filter { $0 != top }
-        guard !others.isEmpty else { return (top, top) }
+        guard !others.isEmpty else { return nil }
         if let totals = ranking?.breakdowns.mapValues(\.total),
            let best = others.max(by: { (totals[$0] ?? -1) < (totals[$1] ?? -1) }) {
-            return (top, best)
+            return best
         }
         let i = ids.firstIndex(of: top) ?? 0
-        return (top, i + 1 < ids.count ? ids[i + 1] : ids[i - 1])
+        return i + 1 < ids.count ? ids[i + 1] : ids[i - 1]
     }
 
     /// Time gap and visual distance from the previous frame in time order, for calibration.

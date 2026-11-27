@@ -57,7 +57,7 @@ private struct ImportContent: View {
             MomentsFeed(model: model, dayID: ref.id, showSettings: $showSettings)
         }
         .navigationDestination(for: MomentRef.self) { ref in
-            MomentDetailView(model: model, ids: ref.ids)
+            MomentViewer(model: model, ids: ref.ids)
         }
     }
 }
@@ -99,18 +99,54 @@ extension View {
     }
 }
 
-/// Marks a frame the owner picked: blue, or green once it's saved to Photos.
-struct PickedBadge: View {
-    var saved = false
+/// The selection control in a photo's top-left corner: an empty ring, blue once selected
+/// (saving), green once it's in Photos. `count` above 1 shows how many frames of a moment
+/// are selected.
+struct SelectionCircle: View {
+    enum Kind { case unselected, selected, saved }
+
+    let state: Kind
+    var count = 0
+    let toggle: () -> Void
 
     var body: some View {
-        Image(systemName: "checkmark")
-            .font(.caption.weight(.bold))
+        Button(action: toggle) {
+            ZStack {
+                Circle().fill(fill)
+                Circle().strokeBorder(.white, lineWidth: 2)
+                if state != .unselected {
+                    if count > 1 {
+                        Text("\(count)").font(.caption.weight(.bold).monospacedDigit())
+                    } else {
+                        Image(systemName: "checkmark").font(.caption.weight(.bold))
+                    }
+                }
+            }
             .foregroundStyle(.white)
-            .padding(7)
-            .background(saved ? .green : .blue, in: Circle())
+            .frame(width: 28, height: 28)
+            .shadow(color: .black.opacity(0.3), radius: 2)
             .padding(10)
-            .accessibilityLabel(saved ? "Picked, saved to Photos" : "Picked")
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(state == .unselected ? [] : .isSelected)
+    }
+
+    private var fill: Color {
+        switch state {
+        case .unselected: return .black.opacity(0.25)
+        case .selected: return .blue
+        case .saved: return .green
+        }
+    }
+
+    private var label: String {
+        switch state {
+        case .unselected: return "Select"
+        case .selected: return count > 1 ? "\(count) selected, saving" : "Selected, saving"
+        case .saved: return count > 1 ? "\(count) selected, in Photos" : "Selected, in Photos"
+        }
     }
 }
 
@@ -129,7 +165,7 @@ struct FlawTip: View {
 
 /// Marks the suggested frame of a moment (until the owner picks one), or the favourite in compare.
 struct SuggestedBadge: View {
-    var label = "Suggested pick"
+    var label = "Suggested"
 
     var body: some View {
         Image(systemName: "star.fill")
@@ -205,7 +241,9 @@ private struct DayCollage: View {
 
     private var subtitle: String {
         let shots = day.shotIDs.count == 1 ? "1 shot" : "\(day.shotIDs.count) shots"
-        return [shots, model.dayTimeSpan(day)].compactMap { $0 }.joined(separator: " · ")
+        let selected = model.selected(in: day.shotIDs).count
+        return [shots, selected > 0 ? "\(selected) selected" : nil, model.dayTimeSpan(day)]
+            .compactMap { $0 }.joined(separator: " · ")
     }
 }
 
@@ -228,6 +266,14 @@ private struct MomentsFeed: View {
                         MomentTile(model: model, ids: ids)
                     }
                     .buttonStyle(.plain)
+                    // Outside the link, so tapping the circle selects instead of opening.
+                    .overlay(alignment: .topLeading) {
+                        let hero = model.hero(of: ids)
+                        SelectionCircle(state: model.selectionState(hero),
+                                        count: model.selected(in: ids).count) {
+                            model.toggleSelection(hero)
+                        }
+                    }
                 }
             }
         }
@@ -237,13 +283,9 @@ private struct MomentsFeed: View {
         .navigationTitle(model.days.first { $0.id == dayID }?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            let unsaved = model.unsavedPicks(in: model.order)
-            if !unsaved.isEmpty {
-                Button { model.saves.save(unsaved) } label: {
-                    Label("Save \(unsaved.count)", systemImage: "square.and.arrow.down")
-                        .labelStyle(.titleAndIcon)
-                }
-                .accessibilityLabel("Save \(unsaved.count) picks to Photos")
+            let selected = model.selected(in: model.order).count
+            if selected > 0 {
+                Text("\(selected) selected").font(.subheadline).foregroundStyle(.secondary)
             }
             SettingsButton(showSettings: $showSettings)
         }
@@ -269,7 +311,8 @@ private struct MomentsFeed: View {
     }
 }
 
-/// A moment as one full-width photo: the suggested pick (the middle frame until scored).
+/// A moment as one full-width photo: its first selected frame, else the suggestion (the
+/// middle frame until scored). The selection circle is laid over it by the feed.
 private struct MomentTile: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
@@ -281,9 +324,6 @@ private struct MomentTile: View {
             .frame(maxWidth: .infinity)
             .overlay(alignment: .bottomLeading) {
                 PhotoLabel(title: model.timeLabel(of: ids), count: ids.count)
-            }
-            .overlay(alignment: .topTrailing) {
-                if let pick = model.picked(in: ids) { PickedBadge(saved: model.isSaved(pick)) }
             }
             .contentShape(Rectangle())
     }

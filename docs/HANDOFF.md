@@ -50,6 +50,18 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
 **Verified on device Nov 26, 2026:** cached previews decode in 0.03–0.04 s, Vision prints in
 0.2–0.3 s, and collages fill in. Keep blocking work off the cooperative pool (use `Background`).
 
+## Selecting and viewing (Nov 27, 2026, not yet checked on device)
+
+- Navigation is Days → Moments → `MomentViewer`. The viewer replaces the old frame list, zoom
+  sheet and compare screen: one zoomable frame, filmstrip below, swipe at fit zoom to step;
+  Compare splits into two locked-zoom panes (RAW full resolution), the filmstrip fills the
+  second pane, Swap exchanges them. Single-frame moments have no filmstrip.
+- `SelectionCircle` (top-left of every photo; on a moment tile it toggles the tile's photo and
+  shows the moment's count) replaces picks: any number per moment. Selecting saves to Photos
+  automatically (`SaveQueue`); deselecting an unsaved frame unqueues it, a saved one asks iOS
+  to delete it from Photos (stays selected if kept). Day collages and the moments toolbar
+  show selected counts. Unsaved selections re-queue on every connect.
+
 ## Connection lifecycle (Nov 27, 2026, not yet checked on device)
 
 - Unplugging mid-session keeps everything and shows `ReconnectOverlay` over the current screen
@@ -102,7 +114,7 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
 3. ~~Save picks~~ (built Nov 27, 2026, **not yet checked on device**): `SaveQueue` saves picks one
    at a time in the background (RAF via `ImportModel.rawURL`, full-size JPEG via
    `RAWRenderer.renderJPEG`, pair via `PhotoSaver` with the RAF as editing base and the camera's file
-   names). Start from a day's toolbar ("Save N") or a pick's long-press menu. `SaveBar` sits
+   names). Selecting a frame queues it. `SaveBar` sits
    under the whole navigation stack, above the reconnect overlay; unplugging pauses it
    (`rawURL` waits for the camera). The next pick's RAF downloads while one renders, and a
    RAF compare already decoded isn't decoded again.

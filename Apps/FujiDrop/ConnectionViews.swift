@@ -43,7 +43,7 @@ struct ReconnectOverlay: View {
         case .opening(let name): return "Reconnecting to \(name)…"
         case .loadingCatalog, .failed: return camera.phase.statusText
         default:
-            return "Plug the camera back in and turn it on to carry on where you left off. Your picks are kept."
+            return "Plug the camera back in and turn it on to carry on where you left off. Your selections are kept."
         }
     }
 }

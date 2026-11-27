@@ -40,7 +40,11 @@ final class PreviewImageLoader: @unchecked Sendable {
         }
     }
 
-    private static func fullKey(_ raw: URL) -> NSString { "\(raw.lastPathComponent)@full" as NSString }
+    /// Keyed by the cache folder too (`DSCF1234-<size>/DSCF1234.RAF`): the file name alone
+    /// is shared by a different photo with the same number on another card or camera.
+    private static func fullKey(_ raw: URL) -> NSString {
+        "\(raw.deletingLastPathComponent().lastPathComponent)/\(raw.lastPathComponent)@full" as NSString
+    }
 
     private func load(key: NSString, decode: () async -> UIImage?) async -> UIImage? {
         if let hit = cache.object(forKey: key) { return hit }

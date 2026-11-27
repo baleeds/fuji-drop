@@ -41,9 +41,9 @@ public enum RAWRenderer {
 
     /// Writes `<basename>.JPG` next to `raw` (or into `directory`) and returns its URL.
     /// Uses Apple's default RAW rendering with the RAF's own EXIF (capture date, camera, lens).
-    @discardableResult
     /// Pass `image` when the RAF is already decoded at full size (e.g. by compare) to skip
     /// decoding it again; metadata still comes from `raw`.
+    @discardableResult
     public static func renderJPEG(from raw: URL, image: CGImage? = nil, into directory: URL? = nil,
                                   quality: Double = 0.92) throws -> URL {
         let cg = try image ?? renderImage(from: raw)
