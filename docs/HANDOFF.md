@@ -55,7 +55,7 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
 - Unplugging mid-session keeps everything and shows `ReconnectOverlay` over the current screen
   (also over compare and the zoom sheet, via `.reconnectOverlay(model)`). Camera work stops;
   analysis of previews already on disk carries on.
-- Reconnecting the same camera (`CameraSession.cameraID`: name + serial, else name) resumes:
+- Reconnecting the same camera (`CameraSession.cameraID`: the model name; iOS has no serial) resumes:
   shots are rebuilt from the new catalog and keep their analysis when `Shot.key`
   (camera/name-size) matches; files gone from the card drop out ("Not on this card" screens);
   the open day re-queues. Late results only land if the key still matches.

@@ -41,11 +41,33 @@ struct ReconnectOverlay: View {
     private var status: String {
         switch camera.phase {
         case .opening(let name): return "Reconnecting to \(name)…"
-        case .loadingCatalog(let name): return "Reading \(name)'s card…"
-        case .failed(let reason): return reason
+        case .loadingCatalog, .failed: return camera.phase.statusText
         default:
             return "Plug the camera back in and turn it on to carry on where you left off. Your picks are kept."
         }
+    }
+}
+
+extension CameraSession.Phase {
+    /// What the connect screen says for each phase; the reconnect overlay reuses some.
+    var statusText: String {
+        switch self {
+        case .idle: return "Connect your camera"
+        case .waitingForAuthorization: return "Waiting for permission…"
+        case .searching: return "Looking for the camera…"
+        case .opening(let n): return "Opening \(n)…"
+        case .loadingCatalog(let n): return "Reading \(n)'s card…"
+        case .ready(let n): return "\(n) ready"
+        case .failed(let reason): return reason
+        }
+    }
+}
+
+/// Shown when the open day or moment isn't on the card after reconnecting.
+struct NotOnCardView: View {
+    var body: some View {
+        ContentUnavailableView("Not on this card", systemImage: "sdcard",
+                               description: Text("These photos are no longer on the camera's card."))
     }
 }
 

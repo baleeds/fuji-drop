@@ -11,7 +11,7 @@ struct ImportView: View {
         }
         .reconnectOverlay(model)
         // Session ended or a different camera: nothing pushed belongs to it any more.
-        .onChange(of: model.sessionGeneration) { path = NavigationPath() }
+        .onChange(of: model.cameraID) { path = NavigationPath() }
     }
 }
 
@@ -39,9 +39,6 @@ private struct ImportContent: View {
             if inSession {
                 ToolbarItem(placement: .topBarTrailing) { SettingsButton(showSettings: $showSettings) }
             }
-        }
-        .onChange(of: camera.catalogComplete) {
-            if camera.catalogComplete { model.catalogReady() } else { model.cameraDisconnected() }
         }
         .sheet(isPresented: $showSettings) {
             TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, log: camera.log,
@@ -213,12 +210,7 @@ private struct MomentsFeed: View {
     @Binding var showSettings: Bool
 
     var body: some View {
-        if model.days.contains(where: { $0.id == dayID }) {
-            feed
-        } else {
-            ContentUnavailableView("Not on this card", systemImage: "sdcard",
-                                   description: Text("These photos are no longer on the camera's card."))
-        }
+        if model.hasDay(dayID) { feed } else { NotOnCardView() }
     }
 
     private var feed: some View {
@@ -323,16 +315,6 @@ private struct ConnectView: View {
         return "\(files) found · \(elapsed) s"
     }
 
-    private var status: String {
-        switch camera.phase {
-        case .idle: return "Connect your camera"
-        case .waitingForAuthorization: return "Waiting for permission…"
-        case .searching: return "Looking for the camera…"
-        case .opening(let n): return "Opening \(n)…"
-        case .loadingCatalog(let n): return "Reading \(n)'s card…"
-        case .ready(let n): return "\(n) ready"
-        case .failed(let reason): return reason
-        }
-    }
+    private var status: String { camera.phase.statusText }
 }
 

@@ -32,8 +32,10 @@ public final class CameraSession: NSObject, ObservableObject {
     @Published public private(set) var camera: ICCameraDevice?
     @Published public private(set) var files: [ICCameraFile] = []
     @Published public private(set) var catalogComplete = false
-    /// Identifies the connected body across reconnects: its serial number when iOS provides
-    /// one, else its name. Set when the catalog completes; nil while disconnected.
+    /// Identifies the connected body across reconnects. iOS doesn't expose the serial number
+    /// (`serialNumberString` is macOS-only), so this is the model name: two bodies of the same
+    /// model count as one camera, which is harmless because files are still told apart by
+    /// name and size. Set when the catalog completes; nil while disconnected.
     @Published public private(set) var cameraID: String?
     @Published public private(set) var log: [LogLine] = []
 
@@ -316,9 +318,7 @@ public final class CameraSession: NSObject, ObservableObject {
 
     fileprivate func handleCatalogComplete(_ device: ICCameraDevice) {
         handleItemsAdded(device.mediaFiles ?? [])
-        let serial = device.serialNumberString.flatMap { $0.isEmpty ? nil : $0 }
-        cameraID = serial.map { "\(device.name ?? "camera") \($0)" } ?? device.name ?? "camera"
-        record("Camera identity: \(cameraID ?? "?")\(serial == nil ? " (no serial number available)" : "")")
+        cameraID = device.name ?? "camera"
         catalogComplete = true
         phase = .ready(device.name ?? "camera")
         record("Catalog complete: \(files.count) files, \(shots.count) shots, \(shots.filter(\.isComplete).count) RAF+JPEG pairs.")

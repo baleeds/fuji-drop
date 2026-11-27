@@ -1,3 +1,4 @@
+import Combine
 import FujiDropKit
 import ImageCaptureCore
 import SwiftUI
@@ -26,7 +27,6 @@ final class ImportModel: ObservableObject {
         let id: String              // basename, e.g. DSCF3650
         let raw: ICCameraFile
         let date: Date?
-        let size: Int64
         /// Camera + name + size: this exact file, across reconnects, cards and cameras.
         let key: String
         var previewURL: URL?
@@ -38,13 +38,15 @@ final class ImportModel: ObservableObject {
         var scoreFailed = false
         var error: String?
 
+        var size: Int64 { Int64(raw.fileSize) }
         var isProcessed: Bool { thumbnail != nil || error != nil }
+        /// Not yet read from the camera (and not failed).
+        var needsPreview: Bool { !isProcessed && previewURL == nil }
         /// Can take part in best-shot ranking (frames that failed don't block the others).
         var isRankable: Bool { error == nil && !scoreFailed }
 
-        /// Keeps the analysis of `old` if it's the same file (not its errors: those retry).
+        /// Keeps the analysis of `old`, the same file (not its errors: those retry).
         mutating func carryOver(from old: Shot) {
-            guard old.key == key else { return }
             previewURL = old.previewURL
             thumbnail = old.thumbnail
             print = old.print
@@ -77,8 +79,8 @@ final class ImportModel: ObservableObject {
 
     let camera = CameraSession()
     private let cacheRoot = PreviewCache()
-    /// The connected camera's previews (its own folder under `cacheRoot`).
-    private var cache: PreviewCache?
+    /// The session camera's previews (its own folder under `cacheRoot`).
+    private var cache: PreviewCache? { cameraID.map(cacheRoot.scoped) }
     private let rawCache = RawCache()
     /// In-flight RAF downloads by shot id, so two callers share one download. While any are
     /// running the preview queue waits: the camera answers one request at a time and a RAF
@@ -86,11 +88,10 @@ final class ImportModel: ObservableObject {
     private var rawDownloads: [String: Task<URL?, Never>] = [:]
 
     @Published private(set) var connection = Connection.none
-    /// Bumped on every (re)connect, so views retry camera work that failed while unplugged.
-    @Published private(set) var connectionGeneration = 0
-    /// Bumped when a session ends or a different camera replaces it: views return to the root.
-    @Published private(set) var sessionGeneration = 0
-    private var cameraID: String?
+    /// The session's camera. Kept while unplugged; changes when the session ends (nil) or a
+    /// different camera replaces it, which is when views return to the root.
+    @Published private(set) var cameraID: String?
+    private var cameraObservation: AnyCancellable?
 
     @Published private(set) var days: [Day] = []
     @Published private(set) var selectedDayID: String?
@@ -115,11 +116,22 @@ final class ImportModel: ObservableObject {
     private var worker: Task<Void, Never>?
     /// Bumped whenever camera work stops, so a worker or read finishing late is ignored.
     private var workerGeneration = 0
+    /// Feature-print distances by `Shot.key` pair, so they survive reconnecting.
     private var distanceCache: [String: Float] = [:]
 
     init() {
         pruneCache()
         clearRawCache() // left over from a previous session
+        // The model drives its own connection state from the camera session.
+        cameraObservation = camera.$catalogComplete
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main) // after the change has landed
+            .sink { [weak self] complete in
+                MainActor.assumeIsolated {
+                    if complete { self?.catalogReady() } else { self?.cameraDisconnected() }
+                }
+            }
     }
 
     // MARK: Connection
@@ -133,15 +145,13 @@ final class ImportModel: ObservableObject {
         }
         let resuming = cameraID == id
         cameraID = id
-        cache = cacheRoot.scoped(to: id)
 
         let pairs = camera.shots
         let old = shots
         var fresh: [Shot] = pairs.compactMap { pair in
             pair.raw.map { file in
-                let size = Int64(file.fileSize)
-                return Shot(id: pair.basename, raw: file, date: file.creationDate, size: size,
-                            key: "\(id)/\(pair.basename)-\(size)")
+                Shot(id: pair.basename, raw: file, date: file.creationDate,
+                     key: "\(id)/\(pair.basename)-\(file.fileSize)")
             }
         }
         var kept = 0
@@ -153,7 +163,6 @@ final class ImportModel: ObservableObject {
         }
         skippedNonRAW = pairs.count - fresh.count
         shots = Dictionary(fresh.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        distanceCache = [:]
 
         days = DayGrouping.group(fresh, date: \.date).map { group in
             let sorted = group.items
@@ -171,10 +180,9 @@ final class ImportModel: ObservableObject {
         }
 
         connection = .connected
-        connectionGeneration += 1
 
         // Resume the open day (its moments, its queue), if it's still on the card.
-        if let day = selectedDayID, days.contains(where: { $0.id == day }) {
+        if let day = selectedDayID, hasDay(day) {
             select(dayID: day)
         } else {
             selectedDayID = nil
@@ -203,9 +211,7 @@ final class ImportModel: ObservableObject {
         stopCameraWork()
         clearRawCache()
         cameraID = nil
-        cache = nil
         connection = .none
-        sessionGeneration += 1
         days = []; selectedDayID = nil; shots = [:]; order = []; moments = []
         previewStart = nil; distanceCache = [:]
     }
@@ -219,6 +225,20 @@ final class ImportModel: ObservableObject {
         queue = []
         rawDownloads.values.forEach { $0.cancel() }
         rawDownloads = [:]
+    }
+
+    /// Whether camera work started at `generation` still belongs to the live connection.
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == workerGeneration && connection == .connected
+    }
+
+    /// The ids still on the card (after reconnecting with a changed card, some may be gone).
+    func onCard(_ ids: [String]) -> [String] {
+        ids.filter { shots[$0] != nil }
+    }
+
+    func hasDay(_ id: String) -> Bool {
+        days.contains { $0.id == id }
     }
 
     /// Applies a change to a shot only if it's still the same file.
@@ -238,7 +258,7 @@ final class ImportModel: ObservableObject {
         order = day.shotIDs
         previewStart = (Date(), dayProcessed)
         regroup()
-        enqueue(order, atFront: true, retryFailed: true)
+        enqueue(order, atFront: true)
     }
 
     /// Selected day's shots that have a thumbnail (or failed).
@@ -269,26 +289,21 @@ final class ImportModel: ObservableObject {
         return clamped ? min(max(ratio, 0.8), 1.6) : ratio
     }
 
-    /// Up to `count` ids spread across the given shots' time span.
-    func samples(of ids: [String], count: Int = ImportModel.samplesPerRow) -> [String] {
-        TimeSampling.spread(ids, count: count, date: { self.shots[$0]?.date })
-    }
 
     // MARK: Preview queue
 
     /// Re-queues the day collage samples (clearing earlier failures so they retry).
     func loadDaySamples() {
-        enqueue(days.flatMap(\.sampleIDs), atFront: false, retryFailed: true)
+        enqueue(days.flatMap(\.sampleIDs), atFront: false)
     }
 
-    private func enqueue(_ ids: [String], atFront: Bool, retryFailed: Bool = false) {
-        if retryFailed {
-            for id in ids where shots[id]?.error != nil {
-                shots[id]?.error = nil
-                shots[id]?.previewURL = nil
-            }
+    /// Queues shots that need a preview. Earlier failures are cleared so they retry.
+    private func enqueue(_ ids: [String], atFront: Bool) {
+        for id in ids where shots[id]?.error != nil {
+            shots[id]?.error = nil
+            shots[id]?.previewURL = nil
         }
-        let wanted = ids.filter { shots[$0]?.isProcessed == false && shots[$0]?.previewURL == nil }
+        let wanted = ids.filter { shots[$0]?.needsPreview == true }
         let set = Set(wanted)
         queue.removeAll { set.contains($0) }
         queue = atFront ? wanted + queue : queue + wanted
@@ -321,24 +336,29 @@ final class ImportModel: ObservableObject {
     }
 
     private func loadPreview(_ id: String) async {
-        guard let shot = shots[id], !shot.isProcessed, shot.previewURL == nil, let cache else { return }
-        let key = shot.key
+        guard let shot = shots[id], shot.needsPreview, let cache else { return }
+        let key = shot.key, size = shot.size
         let generation = workerGeneration
         do {
+            // Cache file I/O off the main actor.
             let url: URL
-            if let cached = cache.cachedURL(name: id, size: shot.size) {
+            if let cached = await Task.detached(priority: .userInitiated, operation: {
+                cache.cachedURL(name: id, size: size)
+            }).value {
                 url = cached
             } else {
                 let preview = try await camera.embeddedPreview(of: shot.raw)
                 // Disconnected or reset while reading: drop it (the shot is queued again on resume).
-                guard generation == workerGeneration else { return }
-                url = try cache.store(preview.jpeg, name: id, size: shot.size)
+                guard isCurrent(generation) else { return }
+                url = try await Task.detached(priority: .userInitiated) {
+                    try cache.store(preview.jpeg, name: id, size: size)
+                }.value
             }
             guard update(id, key: key, { $0.previewURL = url }) else { return }
             analyse(id, key: key, url: url)
         } catch {
             // A read cut short by unplugging isn't a problem with the file.
-            guard generation == workerGeneration, connection == .connected else { return }
+            guard isCurrent(generation) else { return }
             update(id, key: key) { $0.error = error.localizedDescription }
             camera.record("Preview \(id) failed: \(error.localizedDescription)")
         }
@@ -406,14 +426,15 @@ final class ImportModel: ObservableObject {
         } else {
             // A cached file that doesn't decode would fail forever: drop it so a retry reads
             // the preview from the camera again.
-            if let shot = shots[id], shot.key == key { cache?.remove(name: id, size: shot.size) }
+            let cache = self.cache
             applied = update(id, key: key) {
+                cache?.remove(name: $0.id, size: $0.size)
                 $0.error = "Could not decode preview"
                 $0.previewURL = nil
             }
             camera.record("Preview \(id): could not decode; removed from the cache so it's read again.")
         }
-        if applied, order.contains(id) { regroup() }
+        // No regroup: grouping uses dates and prints, which a thumbnail doesn't change.
         return applied && thumbnail != nil
     }
 
@@ -502,7 +523,7 @@ final class ImportModel: ObservableObject {
     }
 
     private func distance(_ a: Shot, _ b: Shot) -> Float? {
-        let key = "\(a.id)|\(b.id)"
+        let key = "\(a.key)|\(b.key)"
         if let cached = distanceCache[key] { return cached }
         guard let pa = a.print, let pb = b.print, let d = pa.distance(to: pb) else { return nil }
         distanceCache[key] = d

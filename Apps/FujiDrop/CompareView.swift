@@ -39,16 +39,16 @@ struct CompareView: View {
                 layout {
                     ComparePane(model: model, shot: model.shots[favourite],
                                 flaws: breakdowns?[favourite]?.flaws ?? [], group: group,
-                                connection: model.connectionGeneration, promote: nil)
+                                connection: model.connection, promote: nil)
                     ComparePane(model: model, shot: model.shots[challenger],
                                 flaws: breakdowns?[challenger]?.flaws ?? [], group: group,
-                                connection: model.connectionGeneration) {
+                                connection: model.connection) {
                         let previous = favourite
                         favourite = challenger
                         challenger = previous
                     }
                 }
-                Filmstrip(model: model, ids: ids, favourite: favourite, challenger: challenger) { id in
+                Filmstrip(model: model, ids: model.onCard(ids), favourite: favourite, challenger: challenger) { id in
                     if id != favourite { challenger = id }
                 }
             }
@@ -58,10 +58,10 @@ struct CompareView: View {
             .toolbarBackground(.black, for: .navigationBar)
             .toolbarColorScheme(.dark, for: .navigationBar)
             // After a reconnect the card may have changed; a new session means another camera.
-            .onChange(of: model.connectionGeneration) {
+            .onChange(of: model.connection) {
                 if model.shots[favourite] == nil || model.shots[challenger] == nil { dismiss() }
             }
-            .onChange(of: model.sessionGeneration) { dismiss() }
+            .onChange(of: model.cameraID) { dismiss() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -89,9 +89,9 @@ private struct ComparePane: View {
     let shot: ImportModel.Shot?
     let flaws: [BestShot.Flaw]
     let group: ZoomGroup
-    /// The model's connection generation: a reconnect re-runs loading, so a RAW download
-    /// cut off by unplugging is retried.
-    let connection: Int
+    /// A change (reconnecting) re-runs loading, so a RAW download cut off by unplugging is
+    /// retried.
+    let connection: ImportModel.Connection
     /// Swaps this pane in as the favourite; nil for the favourite itself.
     let promote: (() -> Void)?
     @State private var image: UIImage?
@@ -169,7 +169,7 @@ private struct ComparePane: View {
     private struct TaskKey: Equatable {
         let id: String?
         let preview: URL?
-        let connection: Int
+        let connection: ImportModel.Connection
     }
 
     /// Small status: loading RAW, RAW (full resolution), or RAW unavailable.
@@ -206,7 +206,7 @@ private struct Filmstrip: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
-                    ForEach(ids.filter { model.shots[$0] != nil }, id: \.self) { id in
+                    ForEach(ids, id: \.self) { id in
                         thumbnail(id)
                             .id(id)
                             .onTapGesture { select(id) }

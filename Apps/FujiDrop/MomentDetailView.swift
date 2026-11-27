@@ -6,31 +6,18 @@ import UIKit
 /// Tap a frame to zoom, long-press to pick it, or compare two frames side by side.
 struct MomentDetailView: View {
     @ObservedObject var model: ImportModel
-    private let momentIDs: [String]
+    let ids: [String]
     @AppStorage("showGroupingDetails") private var showDetails = false
     @State private var viewing: String?
     @State private var comparing: CompareStart?
 
-    init(model: ImportModel, ids: [String]) {
-        self.model = model
-        self.momentIDs = ids
-    }
-
-    /// The moment's frames still on the card (after reconnecting with a changed card, some
-    /// may be gone).
-    private var ids: [String] { momentIDs.filter { model.shots[$0] != nil } }
-
     var body: some View {
-        if ids.isEmpty {
-            ContentUnavailableView("Not on this card", systemImage: "sdcard",
-                                   description: Text("These photos are no longer on the camera's card."))
-        } else {
-            moment
-        }
+        // Only the frames still on the card (after reconnecting, some may be gone).
+        let frames = model.onCard(ids)
+        if frames.isEmpty { NotOnCardView() } else { moment(frames) }
     }
 
-    @ViewBuilder private var moment: some View {
-        let ids = self.ids
+    @ViewBuilder private func moment(_ ids: [String]) -> some View {
         let ranking = model.ranking(of: ids)
         let picked = model.picked(in: ids)
         let suggested = picked == nil ? ranking?.suggested : nil
@@ -63,17 +50,17 @@ struct MomentDetailView: View {
                                 Button("Pick", systemImage: "checkmark") { model.setPick(id, in: ids) }
                             }
                             if ids.count > 1 {
-                                Button("Compare", systemImage: "square.split.1x2", action: compare)
+                                Button("Compare", systemImage: "square.split.1x2") { compare(ids) }
                             }
                         }
                 }
             }
         }
-        .navigationTitle(title)
+        .navigationTitle(title(ids))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if ids.count > 1 {
-                Button("Compare", systemImage: "square.split.1x2", action: compare)
+                Button("Compare", systemImage: "square.split.1x2") { compare(ids) }
             }
         }
         .fullScreenCover(item: $comparing) { start in
@@ -87,12 +74,12 @@ struct MomentDetailView: View {
     }
 
     /// Chooses the opening pair once, when compare is opened.
-    private func compare() {
+    private func compare(_ ids: [String]) {
         let start = model.compareStart(in: ids)
         comparing = CompareStart(favourite: start.top, challenger: start.bottom)
     }
 
-    private var title: String {
+    private func title(_ ids: [String]) -> String {
         let time = model.timeLabel(of: ids)
         return ids.count == 1 ? time : "\(time) · \(ids.count) frames"
     }
