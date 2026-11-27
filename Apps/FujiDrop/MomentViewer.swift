@@ -232,7 +232,7 @@ private struct ViewerPane: View {
                 if !Task.isCancelled { full = .failed }
                 return
             }
-            let fullImage = await PreviewImageLoader.shared.loadFullResolution(raw: raw)
+            let fullImage = await PreviewImageLoader.shared.loadFullResolution(raw: raw, reference: shot.previewURL)
             guard !Task.isCancelled else { return }
             if let fullImage {
                 image = fullImage

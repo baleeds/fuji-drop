@@ -13,9 +13,11 @@ public struct GrayImage: Sendable {
         self.pixels = pixels
     }
 
-    /// Draws `image` into a grayscale bitmap at its own size.
-    public init?(_ image: CGImage) {
-        let w = image.width, h = image.height
+    /// Draws `image` into a grayscale bitmap at its own size, or scaled down so its longer
+    /// side is at most `maxSide`.
+    public init?(_ image: CGImage, maxSide: Int? = nil) {
+        let scale = maxSide.map { min(1, Double($0) / Double(max(image.width, image.height, 1))) } ?? 1
+        let w = max(1, Int(Double(image.width) * scale)), h = max(1, Int(Double(image.height) * scale))
         guard w > 0, h > 0 else { return nil }
         var pixels = [UInt8](repeating: 0, count: w * h)
         let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
@@ -23,7 +25,7 @@ public struct GrayImage: Sendable {
                 data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
                 space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
             ) else { return false }
-            context.interpolationQuality = .none
+            context.interpolationQuality = scale < 1 ? .medium : .none
             context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
             return true
         }

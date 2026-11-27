@@ -31,11 +31,13 @@ final class PreviewImageLoader: @unchecked Sendable {
         cache.object(forKey: Self.fullKey(raw))
     }
 
-    /// Decodes a downloaded RAF at full resolution (about 1.3 s).
-    func loadFullResolution(raw: URL) async -> UIImage? {
+    /// Decodes a downloaded RAF at full resolution (about 1.3 s), matching the brightness of
+    /// `reference` (the shot's embedded camera JPEG) so DR200/DR400 frames aren't dark.
+    func loadFullResolution(raw: URL, reference: URL?) async -> UIImage? {
         await load(key: Self.fullKey(raw)) {
             await Background.raw {
-                (try? RAWRenderer.renderImage(from: raw)).map { UIImage(cgImage: $0) }
+                let ref = reference.flatMap { ImageLoading.thumbnail(at: $0, maxPixelSize: 256) }
+                return (try? RAWRenderer.renderImage(from: raw, matching: ref)).map { UIImage(cgImage: $0) }
             }
         }
     }

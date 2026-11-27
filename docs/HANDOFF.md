@@ -77,6 +77,11 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
 
 ## Gotchas learned the hard way
 
+- Apple's RAW engine renders X-T1 RAFs 1–2 stops dark when the camera used DR200/DR400 (Fuji
+  underexposes the RAW and only lifts its own JPEG). `RAWRenderer.renderImage(matching:)`
+  sets `CIRAWFilter.exposure` from a draft render vs the embedded preview (`Brightness`),
+  for compare and saved JPEGs. The RAF itself is untouched; Photos/Capture One develop it.
+
 - ImageCaptureCore callbacks can fire **more than once** (seen with
   `resetControlAuthorization`). Always bridge through `CameraSession.withTimeout` (resume-once).
 - iOS **denies camera control** without prompting, so PTP commands (clock sync) get no answer.

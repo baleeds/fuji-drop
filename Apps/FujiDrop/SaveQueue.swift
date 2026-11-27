@@ -241,9 +241,14 @@ final class SaveQueue: ObservableObject {
         }
 
         // Render the full-size JPEG off the main actor, reusing compare's decode if any.
+        // Either way the brightness matches the camera's own JPEG (see RAWRenderer).
         let decoded = PreviewImageLoader.shared.cachedFullResolution(raw: cached)?.cgImage
+        let preview = shot.previewURL
         let jpeg = try await Background.raw { () -> Result<URL, Error> in
-            Result { try RAWRenderer.renderJPEG(from: raw, image: decoded, into: folder) }
+            Result {
+                let reference = decoded == nil ? preview.flatMap { ImageLoading.thumbnail(at: $0, maxPixelSize: 256) } : nil
+                return try RAWRenderer.renderJPEG(from: raw, image: decoded, matching: reference, into: folder)
+            }
         }.get()
         try Task.checkCancellation()
 
