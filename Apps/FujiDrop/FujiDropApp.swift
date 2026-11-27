@@ -4,7 +4,7 @@ import SwiftUI
 struct FujiDropApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ImportView()
         }
     }
 }

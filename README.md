@@ -10,7 +10,7 @@ Apple Photos as RAW+JPEG. Background and API research: [docs/leverage-research.m
 | --- | --- |
 | `project.yml` | XcodeGen spec (source of truth for the Xcode project) |
 | `Apps/Spike` | **X-T1 Spike** app: runs the four risk checks on a real camera |
-| `Apps/FujiDrop` | Main app shell (placeholder screens for the day flow) |
+| `Apps/FujiDrop` | Main app: connect, read RAF previews, group shots into moments (compare/save next) |
 | `Packages/FujiDropKit` | Shared code: ImageCaptureCore session, PTP helpers, RAF/JPEG pairing, moment grouping, Photos saving |
 | `Config/Signing.xcconfig` | Team / bundle ID; override in `Config/Local.xcconfig` |
 

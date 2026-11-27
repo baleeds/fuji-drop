@@ -1,0 +1,55 @@
+import FujiDropKit
+import SwiftUI
+
+/// Live controls for the moment-grouping thresholds. Changes regroup immediately.
+struct TuningView: View {
+    @Binding var grouper: MomentGrouper
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    row("Burst gap", value: $grouper.burstGap, range: 0.5...10, step: 0.5, format: "%.1f s")
+                    row("Split above Δ", value: float($grouper.splitDistance), range: 0.1...1.5, step: 0.05, format: "%.2f")
+                } header: {
+                    Text("Frames close in time")
+                } footer: {
+                    Text("Frames within the burst gap stay together unless they look more different than the split distance.")
+                }
+                Section {
+                    row("Join gap", value: $grouper.joinGap, range: 10...900, step: 10, format: "%.0f s")
+                    row("Join below Δ", value: float($grouper.joinDistance), range: 0.05...1.0, step: 0.05, format: "%.2f")
+                } header: {
+                    Text("Frames further apart")
+                } footer: {
+                    Text("Frames up to the join gap apart rejoin a moment only if they look this similar.")
+                }
+                Section {
+                    Button("Reset to defaults") { grouper = MomentGrouper() }
+                    LabeledContent("Current", value: summary).font(.caption.monospaced())
+                }
+            }
+            .navigationTitle("Grouping")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Done") { dismiss() } }
+        }
+    }
+
+    private var summary: String {
+        String(format: "burst %.1fs split %.2f join %.0fs/%.2f",
+               grouper.burstGap, grouper.splitDistance, grouper.joinGap, grouper.joinDistance)
+    }
+
+    private func row(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
+                     step: Double, format: String) -> some View {
+        VStack(alignment: .leading) {
+            LabeledContent(title, value: String(format: format, value.wrappedValue))
+            Slider(value: value, in: range, step: step)
+        }
+    }
+
+    private func float(_ binding: Binding<Float>) -> Binding<Double> {
+        Binding(get: { Double(binding.wrappedValue) }, set: { binding.wrappedValue = Float($0) })
+    }
+}
