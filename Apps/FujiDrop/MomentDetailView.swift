@@ -2,7 +2,8 @@ import FujiDropKit
 import SwiftUI
 import UIKit
 
-/// All frames of one moment, full width, top to bottom. Tap a frame to zoom.
+/// All frames of one moment, full width, top to bottom, with the suggested pick marked.
+/// Tap a frame to zoom.
 struct MomentDetailView: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
@@ -10,14 +11,24 @@ struct MomentDetailView: View {
     @State private var viewing: String?
 
     var body: some View {
+        let suggested = model.suggested(in: ids)
+        let ranking = showDetails ? model.ranking(of: ids) : nil
         ScrollView {
             LazyVStack(spacing: 3) {
                 ForEach(ids, id: \.self) { id in
                     PreviewImage(shot: model.shots[id])
                         .aspectRatio(model.aspect(id, clamped: false), contentMode: .fit)
                         .frame(maxWidth: .infinity)
+                        .overlay(alignment: .topTrailing) {
+                            if id == suggested { SuggestedBadge() }
+                        }
                         .overlay(alignment: .bottomLeading) {
-                            if showDetails { PhotoLabel(title: details(id)) }
+                            if showDetails {
+                                VStack(alignment: .leading, spacing: -14) {
+                                    if let r = ranking?[id] { PhotoLabel(title: scoreDetails(r)) }
+                                    PhotoLabel(title: details(id))
+                                }
+                            }
                         }
                         .contentShape(Rectangle())
                         .onTapGesture { viewing = id }
@@ -45,7 +56,30 @@ struct MomentDetailView: View {
         return parts.joined(separator: " · ")
     }
 
+    /// Calibration info: each part of the best-shot score (0–100) and the total.
+    private func scoreDetails(_ r: BestShot.Breakdown) -> String {
+        func pct(_ v: Float) -> String { String(Int((v * 100).rounded())) }
+        var parts = ["focus \(pct(r.sharpness))"]
+        if let face = r.face { parts.append("face \(pct(face))") }
+        if let aesthetics = r.aesthetics { parts.append("look \(pct(aesthetics))") }
+        parts.append("= \(pct(r.total))")
+        return parts.joined(separator: " · ")
+    }
+
     private struct Viewing: Identifiable { let id: String }
+}
+
+/// Marks the suggested frame of a moment.
+private struct SuggestedBadge: View {
+    var body: some View {
+        Image(systemName: "star.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.yellow)
+            .padding(7)
+            .background(.black.opacity(0.45), in: Circle())
+            .padding(10)
+            .accessibilityLabel("Suggested pick")
+    }
 }
 
 /// The full 1920×1280 preview, zoomable.

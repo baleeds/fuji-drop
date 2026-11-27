@@ -199,13 +199,13 @@ private struct MomentsFeed: View {
     }
 }
 
-/// A moment as one full-width photo (its middle frame for now; the suggested pick later).
+/// A moment as one full-width photo: the suggested pick (the middle frame until scored).
 private struct MomentTile: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
 
     var body: some View {
-        let hero = ids[ids.count / 2]
+        let hero = model.hero(of: ids)
         PreviewImage(shot: model.shots[hero])
             .aspectRatio(model.aspect(hero), contentMode: .fit)
             .frame(maxWidth: .infinity)

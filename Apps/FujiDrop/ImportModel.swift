@@ -18,6 +18,8 @@ final class ImportModel: ObservableObject {
         var previewURL: URL?
         var thumbnail: UIImage?
         var print: FeaturePrint?
+        /// Best-shot measurements; arrive after the print.
+        var score: ShotScore?
         var error: String?
 
         var isProcessed: Bool { thumbnail != nil || error != nil }
@@ -217,6 +219,7 @@ final class ImportModel: ObservableObject {
                     self?.camera.record(String(format: "Vision %@: %@ in %.2f s", id, print == nil ? "failed" : "ok", Date().timeIntervalSince(t1)))
                 }
                 self?.finishPrint(id, print)
+                await self?.scoreShot(id, url: url, log: logDetail)
             }
         } catch {
             shots[id]?.error = error.localizedDescription
@@ -225,6 +228,30 @@ final class ImportModel: ObservableObject {
     }
 
     private var decodeLogCount = 0
+
+    /// Measures focus, faces and aesthetics on the full 1920 px preview.
+    private func scoreShot(_ id: String, url: URL, log: Bool) async {
+        let t0 = Date()
+        let measured = await Background.score { () -> (CGImage, ShotScore)? in
+            guard let image = ImageLoading.thumbnail(at: url, maxPixelSize: 1920),
+                  let score = try? ShotScorer.measure(image) else { return nil }
+            return (image, score)
+        }
+        guard let measured else {
+            camera.record("Score \(id): failed")
+            return
+        }
+        let image = measured.0
+        var score = measured.1
+        score.aesthetics = await ShotScorer.aesthetics(of: image)
+        if log {
+            camera.record(String(format: "Score %@ in %.2f s: sharp %.0f, face %@, aesthetics %@",
+                                 id, Date().timeIntervalSince(t0), score.sharpness,
+                                 score.faceQuality.map { String(format: "%.2f", $0) } ?? "none",
+                                 score.aesthetics.map { String(format: "%.2f", $0) } ?? "none"))
+        }
+        shots[id]?.score = score
+    }
 
     private func finishThumbnail(_ id: String, _ thumbnail: CGImage?) {
         if let thumbnail {
@@ -283,6 +310,27 @@ final class ImportModel: ObservableObject {
         guard let pa = a.print, let pb = b.print, let d = pa.distance(to: pb) else { return nil }
         distanceCache[key] = d
         return d
+    }
+
+    /// Each frame's best-shot breakdown, once every frame of the moment is scored.
+    func ranking(of ids: [String]) -> [String: BestShot.Breakdown]? {
+        let scores = ids.compactMap { shots[$0]?.score }
+        guard scores.count == ids.count, !ids.isEmpty else { return nil }
+        return Dictionary(uniqueKeysWithValues: zip(ids, BestShot.rank(scores)))
+    }
+
+    /// The suggested frame, once every frame is scored. Nil for single frames.
+    func suggested(in ids: [String]) -> String? {
+        guard ids.count > 1 else { return nil }
+        let scores = ids.compactMap { shots[$0]?.score }
+        guard scores.count == ids.count, let i = BestShot.bestIndex(scores) else { return nil }
+        return ids[i]
+    }
+
+    /// The frame that stands for a moment: the suggested pick, or the middle frame until all
+    /// frames are scored (so the feed doesn't flicker through partial results).
+    func hero(of ids: [String]) -> String {
+        suggested(in: ids) ?? ids[ids.count / 2]
     }
 
     /// Time gap and visual distance from the previous frame in time order, for calibration.
