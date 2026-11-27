@@ -150,7 +150,13 @@ private struct ViewerPane: View {
     /// nothing more to show past 4×.
     private var maxZoom: CGFloat { loadsRAW ? 8 : 4 }
 
-    var body: some View {
+    /// Width / height of the photo (portrait frames are taller than wide).
+    private var aspect: CGFloat {
+        guard let size = image?.size ?? shot?.thumbnail?.size, size.height > 0 else { return 1.5 }
+        return size.width / size.height
+    }
+
+    private var photo: some View {
         ZStack {
             Color.black
             if let image {
@@ -160,33 +166,44 @@ private struct ViewerPane: View {
             }
         }
         .clipped()
-        .overlay(alignment: .topLeading) {
-            if let shot {
-                SelectionCircle(state: model.selectionState(shot.id)) { model.toggleSelection(shot.id) }
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            if isSuggested { SuggestedBadge() }
-        }
-        .overlay(alignment: .top) {
-            if let letter { PaneLetter(letter: letter).padding(.top, 12) }
-        }
-        .overlay(alignment: .bottomLeading) {
-            VStack(alignment: .leading, spacing: -14) {
-                FlawTip(flaws: flaws)
-                if let details { PhotoLabel(title: details) }
-                if loadsRAW { rawBadge }
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if let swap {
-                Button(action: swap) {
-                    Label("Swap", systemImage: "arrow.up.arrow.down")
-                        .font(.subheadline.weight(.semibold))
+    }
+
+    var body: some View {
+        // The pane is sized to the photo's shape and centred, so every mark sits on the
+        // photo's own corners rather than the edges of the (often much taller) space.
+        ZStack {
+            Color.black
+            photo
+                .aspectRatio(aspect, contentMode: .fit)
+                .overlay(alignment: .topLeading) {
+                    if let shot {
+                        SelectionCircle(state: model.selectionState(shot.id)) { model.toggleSelection(shot.id) }
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .padding(10)
-            }
+                .overlay(alignment: .topTrailing) {
+                    if isSuggested { SuggestedBadge() }
+                }
+                .overlay(alignment: .top) {
+                    if let letter { PaneLetter(letter: letter).padding(.top, 16) }
+                }
+                .overlay(alignment: .bottomLeading) {
+                    VStack(alignment: .leading, spacing: -14) {
+                        FlawTip(flaws: flaws)
+                        if let details { PhotoLabel(title: details) }
+                        if loadsRAW { rawBadge }
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if let swap {
+                        Button(action: swap) {
+                            Label("Swap", systemImage: "arrow.up.arrow.down")
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(8)
+                    }
+                }
         }
         .task(id: TaskKey(id: shot?.id, preview: shot?.previewURL, loadsRAW: loadsRAW)) {
             // Keep showing the previous frame until the new one decodes (usually from the
