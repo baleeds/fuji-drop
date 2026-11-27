@@ -3,11 +3,15 @@ import SwiftUI
 
 struct ImportView: View {
     @StateObject private var model = ImportModel()
+    @State private var path = NavigationPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ImportContent(model: model, camera: model.camera)
         }
+        .reconnectOverlay(model)
+        // Session ended or a different camera: nothing pushed belongs to it any more.
+        .onChange(of: model.sessionGeneration) { path = NavigationPath() }
     }
 }
 
@@ -21,29 +25,29 @@ private struct ImportContent: View {
     @State private var showSettings = false
 
     var body: some View {
+        let inSession = model.connection != .none
         Group {
-            if camera.catalogComplete {
+            if inSession {
                 DaysFeed(model: model)
             } else {
                 ConnectView(camera: camera) { Task { await camera.start() } }
             }
         }
-        .navigationTitle(camera.catalogComplete ? "Fuji Drop" : "")
+        .navigationTitle(inSession ? "Fuji Drop" : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if camera.catalogComplete {
+            if inSession {
                 ToolbarItem(placement: .topBarTrailing) { SettingsButton(showSettings: $showSettings) }
             }
         }
         .onChange(of: camera.catalogComplete) {
-            if camera.catalogComplete { model.catalogReady() }
+            if camera.catalogComplete { model.catalogReady() } else { model.cameraDisconnected() }
         }
         .sheet(isPresented: $showSettings) {
             TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, log: camera.log,
                        clearCache: model.clearCache) {
                 showSettings = false
-                model.reset()
-                camera.stop()
+                model.endSession()
             }
             .presentationDetents([.medium, .large])
         }
@@ -209,6 +213,15 @@ private struct MomentsFeed: View {
     @Binding var showSettings: Bool
 
     var body: some View {
+        if model.days.contains(where: { $0.id == dayID }) {
+            feed
+        } else {
+            ContentUnavailableView("Not on this card", systemImage: "sdcard",
+                                   description: Text("These photos are no longer on the camera's card."))
+        }
+    }
+
+    private var feed: some View {
         ScrollView {
             LazyVStack(spacing: 3) {
                 ForEach(model.moments, id: \.first) { ids in
@@ -258,16 +271,12 @@ private struct MomentTile: View {
             .aspectRatio(model.aspect(hero), contentMode: .fit)
             .frame(maxWidth: .infinity)
             .overlay(alignment: .bottomLeading) {
-                PhotoLabel(title: time, count: ids.count)
+                PhotoLabel(title: model.timeLabel(of: ids), count: ids.count)
             }
             .overlay(alignment: .topTrailing) {
                 if model.picked(in: ids) != nil { PickedBadge() }
             }
             .contentShape(Rectangle())
-    }
-
-    private var time: String {
-        ids.first.flatMap { model.shots[$0]?.date }?.formatted(date: .omitted, time: .shortened) ?? ""
     }
 }
 

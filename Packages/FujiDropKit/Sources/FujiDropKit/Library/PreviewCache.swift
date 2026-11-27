@@ -18,6 +18,13 @@ public struct PreviewCache: Sendable {
             .appendingPathComponent("Previews", isDirectory: true)
     }
 
+    /// A cache for one camera's previews: a subfolder, so each body keeps its own files.
+    /// Pruning, usage and clearing on the parent cover every camera's folder.
+    public func scoped(to camera: String) -> PreviewCache {
+        let safe = camera.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" }
+        return PreviewCache(directory: directory.appendingPathComponent(String(safe), isDirectory: true))
+    }
+
     public func url(name: String, size: Int64) -> URL {
         directory.appendingPathComponent("\(name)-\(size).jpg")
     }
@@ -28,6 +35,11 @@ public struct PreviewCache: Sendable {
         guard FileManager.default.fileExists(atPath: u.path) else { return nil }
         try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: u.path)
         return u
+    }
+
+    /// Drops one preview, e.g. one that turned out not to decode, so it's read again.
+    public func remove(name: String, size: Int64) {
+        try? FileManager.default.removeItem(at: url(name: name, size: size))
     }
 
     @discardableResult
@@ -96,10 +108,11 @@ public struct PreviewCache: Sendable {
         let used: Date
     }
 
+    /// Every cached file, including those in per-camera subfolders.
     private func entries() -> [Entry] {
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: keys)) ?? []
+        let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: keys)
+        let urls = (enumerator?.allObjects as? [URL]) ?? []
         return urls.compactMap { url in
             guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { return nil }
             return Entry(url: url, bytes: Int64(v.fileSize ?? 0), used: v.contentModificationDate ?? .distantPast)

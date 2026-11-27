@@ -6,12 +6,31 @@ import UIKit
 /// Tap a frame to zoom, long-press to pick it, or compare two frames side by side.
 struct MomentDetailView: View {
     @ObservedObject var model: ImportModel
-    let ids: [String]
+    private let momentIDs: [String]
     @AppStorage("showGroupingDetails") private var showDetails = false
     @State private var viewing: String?
     @State private var comparing: CompareStart?
 
+    init(model: ImportModel, ids: [String]) {
+        self.model = model
+        self.momentIDs = ids
+    }
+
+    /// The moment's frames still on the card (after reconnecting with a changed card, some
+    /// may be gone).
+    private var ids: [String] { momentIDs.filter { model.shots[$0] != nil } }
+
     var body: some View {
+        if ids.isEmpty {
+            ContentUnavailableView("Not on this card", systemImage: "sdcard",
+                                   description: Text("These photos are no longer on the camera's card."))
+        } else {
+            moment
+        }
+    }
+
+    @ViewBuilder private var moment: some View {
+        let ids = self.ids
         let ranking = model.ranking(of: ids)
         let picked = model.picked(in: ids)
         let suggested = picked == nil ? ranking?.suggested : nil
@@ -59,9 +78,11 @@ struct MomentDetailView: View {
         }
         .fullScreenCover(item: $comparing) { start in
             CompareView(model: model, ids: ids, start: start)
+                .reconnectOverlay(model)
         }
         .sheet(item: Binding(get: { viewing.map { Viewing(id: $0) } }, set: { viewing = $0?.id })) { v in
             PreviewSheet(shot: model.shots[v.id])
+                .reconnectOverlay(model)
         }
     }
 
@@ -72,7 +93,7 @@ struct MomentDetailView: View {
     }
 
     private var title: String {
-        let time = ids.first.flatMap { model.shots[$0]?.date }?.formatted(date: .omitted, time: .shortened) ?? ""
+        let time = model.timeLabel(of: ids)
         return ids.count == 1 ? time : "\(time) · \(ids.count) frames"
     }
 

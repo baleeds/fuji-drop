@@ -32,6 +32,9 @@ public final class CameraSession: NSObject, ObservableObject {
     @Published public private(set) var camera: ICCameraDevice?
     @Published public private(set) var files: [ICCameraFile] = []
     @Published public private(set) var catalogComplete = false
+    /// Identifies the connected body across reconnects: its serial number when iOS provides
+    /// one, else its name. Set when the catalog completes; nil while disconnected.
+    @Published public private(set) var cameraID: String?
     @Published public private(set) var log: [LogLine] = []
 
     private let browser = ICDeviceBrowser()
@@ -79,6 +82,7 @@ public final class CameraSession: NSObject, ObservableObject {
         camera = nil
         files = []
         catalogComplete = false
+        cameraID = nil
         phase = .idle
         record("Stopped.")
     }
@@ -285,6 +289,7 @@ public final class CameraSession: NSObject, ObservableObject {
         camera = nil
         files = []
         catalogComplete = false
+        cameraID = nil
         phase = .searching
     }
 
@@ -311,6 +316,9 @@ public final class CameraSession: NSObject, ObservableObject {
 
     fileprivate func handleCatalogComplete(_ device: ICCameraDevice) {
         handleItemsAdded(device.mediaFiles ?? [])
+        let serial = device.serialNumberString.flatMap { $0.isEmpty ? nil : $0 }
+        cameraID = serial.map { "\(device.name ?? "camera") \($0)" } ?? device.name ?? "camera"
+        record("Camera identity: \(cameraID ?? "?")\(serial == nil ? " (no serial number available)" : "")")
         catalogComplete = true
         phase = .ready(device.name ?? "camera")
         record("Catalog complete: \(files.count) files, \(shots.count) shots, \(shots.filter(\.isComplete).count) RAF+JPEG pairs.")

@@ -50,6 +50,19 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
 **Verified on device Nov 26, 2026:** cached previews decode in 0.03–0.04 s, Vision prints in
 0.2–0.3 s, and collages fill in. Keep blocking work off the cooperative pool (use `Background`).
 
+## Connection lifecycle (Nov 27, 2026, not yet checked on device)
+
+- Unplugging mid-session keeps everything and shows `ReconnectOverlay` over the current screen
+  (also over compare and the zoom sheet, via `.reconnectOverlay(model)`). Camera work stops;
+  analysis of previews already on disk carries on.
+- Reconnecting the same camera (`CameraSession.cameraID`: name + serial, else name) resumes:
+  shots are rebuilt from the new catalog and keep their analysis when `Shot.key`
+  (camera/name-size) matches; files gone from the card drop out ("Not on this card" screens);
+  the open day re-queues. Late results only land if the key still matches.
+- A different camera clears the session and pops to the day list. Settings › Disconnect ends
+  the session and returns to Connect. Previews are cached per camera (`PreviewCache.scoped`).
+- Picks are keyed by `Shot.key` (`picks.v2` in UserDefaults; earlier picks were dropped).
+
 ## Gotchas learned the hard way
 
 - ImageCaptureCore callbacks can fire **more than once** (seen with

@@ -57,14 +57,16 @@ final class PreviewImageLoader: @unchecked Sendable {
 struct PreviewImage: View {
     let shot: ImportModel.Shot?
     @Environment(\.displayScale) private var displayScale
-    @State private var sharp: UIImage?
+    /// The sharp decode and which file it is, so a view reused for another shot (a moment's
+    /// hero changing) never shows the previous shot's image.
+    @State private var sharp: (url: URL, image: UIImage)?
 
     var body: some View {
         GeometryReader { geo in
             let pixels = PreviewImageLoader.bucket(Int(max(geo.size.width, geo.size.height) * displayScale))
             ZStack {
                 Rectangle().fill(Color(white: 0.12))
-                if let image = sharp ?? shot?.thumbnail {
+                if let image = (sharp?.url == shot?.previewURL ? sharp?.image : nil) ?? shot?.thumbnail {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
@@ -77,8 +79,10 @@ struct PreviewImage: View {
                 }
             }
             .task(id: LoadKey(url: shot?.previewURL, pixels: pixels)) {
-                guard let url = shot?.previewURL, pixels > 360 else { return }
-                sharp = await PreviewImageLoader.shared.load(url: url, maxPixelSize: pixels)
+                guard let url = shot?.previewURL, pixels > 360,
+                      let image = await PreviewImageLoader.shared.load(url: url, maxPixelSize: pixels)
+                else { return }
+                sharp = (url, image)
             }
         }
     }

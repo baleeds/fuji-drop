@@ -97,8 +97,9 @@ public enum BestShot {
             }
 
             var flaws: [Flaw] = []
-            // Soft only relative to a sharper frame, so a lone frame is never flagged.
-            if scores.count > 1, sharp < thresholds.softFocus { flaws.append(.softFocus) }
+            // Soft only relative to a sharper frame, so a lone frame (or a moment where nothing
+            // measured any detail, e.g. lens cap on) is never flagged.
+            if scores.count > 1, maxSharpness > 0, sharp < thresholds.softFocus { flaws.append(.softFocus) }
             if let eyes = s.eyeOpenness, eyes < thresholds.eyesClosed { flaws.append(.eyesClosed) }
             if let q = s.faceQuality, q < thresholds.unclearFace, bestFace >= thresholds.goodFace {
                 flaws.append(.faceUnclear)

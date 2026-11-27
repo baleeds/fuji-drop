@@ -38,9 +38,11 @@ struct CompareView: View {
             VStack(spacing: 0) {
                 layout {
                     ComparePane(model: model, shot: model.shots[favourite],
-                                flaws: breakdowns?[favourite]?.flaws ?? [], group: group, promote: nil)
+                                flaws: breakdowns?[favourite]?.flaws ?? [], group: group,
+                                connection: model.connectionGeneration, promote: nil)
                     ComparePane(model: model, shot: model.shots[challenger],
-                                flaws: breakdowns?[challenger]?.flaws ?? [], group: group) {
+                                flaws: breakdowns?[challenger]?.flaws ?? [], group: group,
+                                connection: model.connectionGeneration) {
                         let previous = favourite
                         favourite = challenger
                         challenger = previous
@@ -55,6 +57,11 @@ struct CompareView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.black, for: .navigationBar)
             .toolbarColorScheme(.dark, for: .navigationBar)
+            // After a reconnect the card may have changed; a new session means another camera.
+            .onChange(of: model.connectionGeneration) {
+                if model.shots[favourite] == nil || model.shots[challenger] == nil { dismiss() }
+            }
+            .onChange(of: model.sessionGeneration) { dismiss() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -82,6 +89,9 @@ private struct ComparePane: View {
     let shot: ImportModel.Shot?
     let flaws: [BestShot.Flaw]
     let group: ZoomGroup
+    /// The model's connection generation: a reconnect re-runs loading, so a RAW download
+    /// cut off by unplugging is retried.
+    let connection: Int
     /// Swaps this pane in as the favourite; nil for the favourite itself.
     let promote: (() -> Void)?
     @State private var image: UIImage?
@@ -119,7 +129,7 @@ private struct ComparePane: View {
             }
         }
         .overlay(alignment: .bottomLeading) { rawBadge }
-        .task(id: TaskKey(id: shot?.id, preview: shot?.previewURL)) {
+        .task(id: TaskKey(id: shot?.id, preview: shot?.previewURL, connection: connection)) {
             // Keep showing the previous frame until the new one decodes (usually from the
             // in-memory cache), so the zoomable view and its viewport carry over.
             guard let shot else { image = nil; return }
@@ -130,15 +140,19 @@ private struct ComparePane: View {
                 return
             }
             full = .loading
+            // Replace the previous frame even on failure (nil falls back to this shot's
+            // thumbnail), so a pane never shows one frame under another's labels.
+            var preview: UIImage?
             if let url = shot.previewURL {
-                let preview = await PreviewImageLoader.shared.load(url: url, maxPixelSize: 1920)
-                guard !Task.isCancelled else { return }
-                image = preview
+                preview = await PreviewImageLoader.shared.load(url: url, maxPixelSize: 1920)
             }
+            guard !Task.isCancelled else { return }
+            image = preview
             // Then the real pixels. The download continues if this pane moves on to another
             // frame, so switching back is instant.
             guard let raw = await model.rawURL(shot.id), !Task.isCancelled else {
-                if !Task.isCancelled { full = .failed }
+                // While unplugged this stays "loading": the reconnect re-runs this task.
+                if !Task.isCancelled, model.connection == .connected { full = .failed }
                 return
             }
             let fullImage = await PreviewImageLoader.shared.loadFullResolution(raw: raw)
@@ -155,6 +169,7 @@ private struct ComparePane: View {
     private struct TaskKey: Equatable {
         let id: String?
         let preview: URL?
+        let connection: Int
     }
 
     /// Small status: loading RAW, RAW (full resolution), or RAW unavailable.
@@ -191,7 +206,7 @@ private struct Filmstrip: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
-                    ForEach(ids, id: \.self) { id in
+                    ForEach(ids.filter { model.shots[$0] != nil }, id: \.self) { id in
                         thumbnail(id)
                             .id(id)
                             .onTapGesture { select(id) }

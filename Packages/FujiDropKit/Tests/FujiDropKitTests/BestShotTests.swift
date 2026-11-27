@@ -106,6 +106,8 @@ final class BestShotTests: XCTestCase {
         XCTAssertEqual(ranked[0].flaws, [])
         XCTAssertEqual(ranked[1].flaws, [.softFocus])
         XCTAssertEqual(BestShot.rank([ShotScore(sharpness: 1)])[0].flaws, [], "a lone frame isn't soft")
+        XCTAssertEqual(BestShot.rank([ShotScore(sharpness: 0), ShotScore(sharpness: 0)]).map(\.flaws), [[], []],
+                       "no detail anywhere (lens cap) isn't soft focus")
     }
 
     func testClosedEyesFlaggedAndPenalised() {

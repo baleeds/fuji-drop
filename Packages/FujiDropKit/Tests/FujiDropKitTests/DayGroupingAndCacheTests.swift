@@ -76,6 +76,24 @@ final class PreviewCacheTests: XCTestCase {
         XCTAssertNil(cache.cachedURL(name: "b", size: 100))
     }
 
+    func testPerCameraFoldersAreSeparateButPrunedTogether() throws {
+        let a = cache.scoped(to: "X-T1 123/45"), b = cache.scoped(to: "X-T2")
+        let urlA = try a.store(Data(count: 100), name: "DSCF0001", size: 100)
+        try b.store(Data(count: 50), name: "DSCF0001", size: 100)
+        XCTAssertNotEqual(a.directory, b.directory)
+        XCTAssertFalse(urlA.path.contains("123/45"), "camera id is made safe for a folder name")
+        XCTAssertNil(cache.cachedURL(name: "DSCF0001", size: 100), "the parent doesn't see camera files")
+        XCTAssertEqual(cache.usage(), .init(files: 2, bytes: 150))
+        XCTAssertEqual(cache.clear(), .init(files: 2, bytes: 150))
+        XCTAssertNil(a.cachedURL(name: "DSCF0001", size: 100))
+    }
+
+    func testRemoveDropsOneEntry() throws {
+        try cache.store(Data([1]), name: "DSCF0001", size: 1)
+        cache.remove(name: "DSCF0001", size: 1)
+        XCTAssertNil(cache.cachedURL(name: "DSCF0001", size: 1))
+    }
+
     func testClearAndUsage() throws {
         let now = Date()
         try put("a", bytes: 100, daysAgo: 0, now: now)
