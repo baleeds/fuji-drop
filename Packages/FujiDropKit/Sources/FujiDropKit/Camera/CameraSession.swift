@@ -1,6 +1,7 @@
 #if os(iOS)
 import Foundation
 import ImageCaptureCore
+import os
 
 /// Wraps ImageCaptureCore: finds a USB camera, opens a session, keeps the file catalog,
 /// and offers async thumbnail / metadata / download / PTP calls.
@@ -87,7 +88,11 @@ public final class CameraSession: NSObject, ObservableObject {
         controlAuthorization = browser.controlAuthorizationStatus.rawValue
     }
 
+    private static let logger = Logger(subsystem: "FujiDrop", category: "camera")
+
+    /// Appends to the in-app log and mirrors to the Xcode console (filter on "FujiDrop").
     public func record(_ text: String) {
+        Self.logger.notice("\(text, privacy: .public)")
         log.append(LogLine(text: text))
     }
 

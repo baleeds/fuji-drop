@@ -48,6 +48,10 @@ struct PreviewImage: View {
                         .scaledToFill()
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
+                } else if shot?.error != nil {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("Preview failed")
                 }
             }
             .task(id: LoadKey(url: shot?.previewURL, pixels: pixels)) {

@@ -39,7 +39,8 @@ private struct ImportContent: View {
             if camera.catalogComplete { model.catalogReady() }
         }
         .sheet(isPresented: $showSettings) {
-            TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, clearCache: model.clearCache) {
+            TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, log: camera.log,
+                       clearCache: model.clearCache) {
                 showSettings = false
                 model.reset()
                 camera.stop()
@@ -103,6 +104,7 @@ private struct DaysFeed: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 16)
         }
+        .onAppear { model.loadDaySamples() }
     }
 }
 

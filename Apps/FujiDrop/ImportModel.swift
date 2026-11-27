@@ -82,8 +82,8 @@ final class ImportModel: ObservableObject {
         let undated = rawShots.filter { $0.date == nil }.count
         camera.record("Import: \(rawShots.count) RAW shots over \(days.count) days; \(undated) undated, \(skippedNonRAW) non-RAW skipped.")
 
-        // Day-row samples first, newest day first.
-        enqueue(days.flatMap(\.sampleIDs), atFront: false)
+        // Day collage samples first, newest day first.
+        loadDaySamples()
     }
 
     func reset() {
@@ -102,7 +102,7 @@ final class ImportModel: ObservableObject {
         order = day.shotIDs
         previewStart = (Date(), dayProcessed)
         regroup()
-        enqueue(order, atFront: true)
+        enqueue(order, atFront: true, retryFailed: true)
     }
 
     /// Selected day's shots that have a thumbnail (or failed).
@@ -140,16 +140,31 @@ final class ImportModel: ObservableObject {
 
     // MARK: Preview queue
 
-    private func enqueue(_ ids: [String], atFront: Bool) {
+    /// Re-queues the day collage samples (clearing earlier failures so they retry).
+    func loadDaySamples() {
+        enqueue(days.flatMap(\.sampleIDs), atFront: false, retryFailed: true)
+    }
+
+    private func enqueue(_ ids: [String], atFront: Bool, retryFailed: Bool = false) {
+        if retryFailed {
+            for id in ids where shots[id]?.error != nil {
+                shots[id]?.error = nil
+                shots[id]?.previewURL = nil
+            }
+        }
         let wanted = ids.filter { shots[$0]?.isProcessed == false }
         let set = Set(wanted)
         queue.removeAll { set.contains($0) }
         queue = atFront ? wanted + queue : queue + wanted
-        guard worker == nil else { return }
+        guard !queue.isEmpty, worker == nil else { return }
+        camera.record("Preview queue: starting with \(queue.count) shots.")
         worker = Task { [weak self] in
+            var loaded = 0
             while let self, !Task.isCancelled, let id = self.nextQueued() {
                 await self.loadPreview(id)
+                loaded += 1
             }
+            self?.camera.record("Preview queue: idle after \(loaded) shots.")
             self?.worker = nil
             self?.refreshCacheUsage()
         }
@@ -190,7 +205,10 @@ final class ImportModel: ObservableObject {
     private func finish(_ id: String, thumbnail: CGImage?, print: FeaturePrint?) {
         shots[id]?.thumbnail = thumbnail.map { UIImage(cgImage: $0) }
         shots[id]?.print = print
-        if thumbnail == nil { shots[id]?.error = "Could not decode preview" }
+        if thumbnail == nil {
+            shots[id]?.error = "Could not decode preview"
+            camera.record("Preview \(id): could not decode \(shots[id]?.previewURL?.lastPathComponent ?? "?")")
+        }
         if order.contains(id) { regroup() }
     }
 

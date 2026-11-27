@@ -5,6 +5,7 @@ import SwiftUI
 struct TuningView: View {
     @Binding var grouper: MomentGrouper
     let cacheUsage: PreviewCache.Usage
+    let log: [CameraSession.LogLine]
     let clearCache: () -> Void
     let disconnect: () -> Void
     @AppStorage("showGroupingDetails") private var showDetails = false
@@ -48,6 +49,7 @@ struct TuningView: View {
                     Text("Previews are kept so reconnecting is instant. Ones unused for 30 days are removed automatically, and the total is capped at 500 MB. iOS may also clear them when storage is low.")
                 }
                 Section {
+                    NavigationLink("Log (\(log.count))") { LogView(log: log) }
                     Button("Disconnect camera", role: .destructive, action: disconnect)
                 }
             }
@@ -77,5 +79,31 @@ struct TuningView: View {
 
     private func float(_ binding: Binding<Float>) -> Binding<Double> {
         Binding(get: { Double(binding.wrappedValue) }, set: { binding.wrappedValue = Float($0) })
+    }
+}
+
+/// The camera/import log, newest first, with a copy button for pasting into a bug report.
+private struct LogView: View {
+    let log: [CameraSession.LogLine]
+    @State private var copied = false
+
+    var body: some View {
+        List(log.reversed()) { line in
+            VStack(alignment: .leading, spacing: 2) {
+                Text(line.date.formatted(date: .omitted, time: .standard))
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text(line.text).font(.caption.monospaced()).textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Log")
+        .toolbar {
+            Button(copied ? "Copied" : "Copy") {
+                let fmt = Date.FormatStyle().hour().minute().second()
+                UIPasteboard.general.string = log
+                    .map { "\($0.date.formatted(fmt))  \($0.text)" }
+                    .joined(separator: "\n")
+                copied = true
+            }
+        }
     }
 }
