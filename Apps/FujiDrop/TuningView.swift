@@ -6,6 +6,8 @@ struct TuningView: View {
     @Binding var grouper: MomentGrouper
     let cacheUsage: PreviewCache.Usage
     let clearCache: () -> Void
+    let disconnect: () -> Void
+    @AppStorage("showGroupingDetails") private var showDetails = false
     @State private var confirmClear = false
     @Environment(\.dismiss) private var dismiss
 
@@ -29,8 +31,11 @@ struct TuningView: View {
                     Text("Frames up to the join gap apart rejoin a moment only if they look this similar.")
                 }
                 Section {
+                    Toggle("Show grouping details", isOn: $showDetails)
                     Button("Reset to defaults") { grouper = MomentGrouper() }
                     LabeledContent("Current", value: summary).font(.caption.monospaced())
+                } footer: {
+                    Text("Details show each frame's file name, time gap and visual distance (Δ) from the previous frame.")
                 }
                 Section {
                     LabeledContent("Saved previews",
@@ -41,6 +46,9 @@ struct TuningView: View {
                     Text("Storage")
                 } footer: {
                     Text("Previews are kept so reconnecting is instant. Ones unused for 30 days are removed automatically, and the total is capped at 500 MB. iOS may also clear them when storage is low.")
+                }
+                Section {
+                    Button("Disconnect camera", role: .destructive, action: disconnect)
                 }
             }
             .confirmationDialog("Clear saved previews?", isPresented: $confirmClear, titleVisibility: .visible) {

@@ -1,47 +1,47 @@
 import FujiDropKit
 import SwiftUI
 
-/// All frames of one moment, with each frame's step from the previous frame
-/// (time gap and Vision distance) shown for calibrating the grouping thresholds.
+/// All frames of one moment, full width, top to bottom. Tap a frame to zoom.
 struct MomentDetailView: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
+    @AppStorage("showGroupingDetails") private var showDetails = false
     @State private var viewing: String?
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 8)], spacing: 12) {
+            LazyVStack(spacing: 3) {
                 ForEach(ids, id: \.self) { id in
-                    Button { viewing = id } label: { cell(id) }
-                        .buttonStyle(.plain)
+                    PreviewImage(shot: model.shots[id])
+                        .aspectRatio(model.aspect(id, clamped: false), contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .overlay(alignment: .bottomLeading) {
+                            if showDetails { PhotoLabel(title: details(id)) }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { viewing = id }
                 }
             }
-            .padding()
-            Text("Δ is the visual distance to the previous frame (smaller = more similar). Use these numbers with the grouping settings to tune splits.")
-                .font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
         }
-        .navigationTitle(ids.count == 1 ? "1 shot" : "\(ids.count) shots")
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: Binding(get: { viewing.map { Viewing(id: $0) } }, set: { viewing = $0?.id })) { v in
             PreviewSheet(shot: model.shots[v.id])
         }
     }
 
-    private func cell(_ id: String) -> some View {
-        let step = model.stepFromPrevious(id)
-        return VStack(alignment: .leading, spacing: 2) {
-            ShotThumbnail(shot: model.shots[id], height: 110)
-                .frame(maxWidth: .infinity)
-            Text(id).font(.caption.monospaced())
-            Text(stepText(step)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-        }
+    private var title: String {
+        let time = ids.first.flatMap { model.shots[$0]?.date }?.formatted(date: .omitted, time: .shortened) ?? ""
+        return ids.count == 1 ? time : "\(time) · \(ids.count) frames"
     }
 
-    private func stepText(_ step: (gap: TimeInterval?, distance: Float?)) -> String {
-        var parts: [String] = []
+    /// Calibration info: file name, time gap and visual distance from the previous frame.
+    private func details(_ id: String) -> String {
+        let step = model.stepFromPrevious(id)
+        var parts = [id]
         if let gap = step.gap { parts.append(String(format: "+%.0f s", gap)) }
         if let d = step.distance { parts.append(String(format: "Δ %.2f", d)) }
-        return parts.isEmpty ? "first" : parts.joined(separator: " · ")
+        return parts.joined(separator: " · ")
     }
 
     private struct Viewing: Identifiable { let id: String }
@@ -69,6 +69,7 @@ private struct PreviewSheet: View {
                     }
                 }
             }
+            .background(.black)
             .navigationTitle(shot?.id ?? "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { dismiss() } }

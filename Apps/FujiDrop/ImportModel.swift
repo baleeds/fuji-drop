@@ -34,7 +34,8 @@ final class ImportModel: ObservableObject {
         }
     }
 
-    static let samplesPerRow = 4
+    /// Samples per day collage (one large, two small).
+    static let samplesPerRow = 3
 
     let camera = CameraSession()
     private let cache = PreviewCache()
@@ -122,6 +123,14 @@ final class ImportModel: ObservableObject {
         let a = first.formatted(date: .omitted, time: .shortened)
         let b = last.formatted(date: .omitted, time: .shortened)
         return a == b ? a : "\(a) – \(b)"
+    }
+
+    /// Display aspect ratio (width / height) of a shot. Clamped by default so portrait frames
+    /// crop to 4:5 in feeds; pass `clamped: false` to show the whole frame.
+    func aspect(_ id: String, clamped: Bool = true) -> CGFloat {
+        guard let size = shots[id]?.thumbnail?.size, size.height > 0 else { return 1.5 }
+        let ratio = size.width / size.height
+        return clamped ? min(max(ratio, 0.8), 1.6) : ratio
     }
 
     /// Up to `count` ids spread across the given shots' time span.

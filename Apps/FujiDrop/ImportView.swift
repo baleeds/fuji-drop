@@ -7,7 +7,6 @@ struct ImportView: View {
     var body: some View {
         NavigationStack {
             ImportContent(model: model, camera: model.camera)
-                .navigationTitle("Fuji Drop")
         }
     }
 }
@@ -24,33 +23,31 @@ private struct ImportContent: View {
     var body: some View {
         Group {
             if camera.catalogComplete {
-                DaysList(model: model)
+                DaysFeed(model: model)
             } else {
                 ConnectView(camera: camera) { Task { await camera.start() } }
             }
         }
+        .navigationTitle(camera.catalogComplete ? "Fuji Drop" : "")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if camera.catalogComplete {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Disconnect") {
-                        model.reset()
-                        camera.stop()
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    SettingsButton(showSettings: $showSettings)
-                }
+                ToolbarItem(placement: .topBarTrailing) { SettingsButton(showSettings: $showSettings) }
             }
         }
         .onChange(of: camera.catalogComplete) {
             if camera.catalogComplete { model.catalogReady() }
         }
         .sheet(isPresented: $showSettings) {
-            TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, clearCache: model.clearCache)
-                .presentationDetents([.medium, .large])
+            TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, clearCache: model.clearCache) {
+                showSettings = false
+                model.reset()
+                camera.stop()
+            }
+            .presentationDetents([.medium, .large])
         }
         .navigationDestination(for: DayRef.self) { ref in
-            MomentsView(model: model, dayID: ref.id, showSettings: $showSettings)
+            MomentsFeed(model: model, dayID: ref.id, showSettings: $showSettings)
         }
         .navigationDestination(for: MomentRef.self) { ref in
             MomentDetailView(model: model, ids: ref.ids)
@@ -58,7 +55,7 @@ private struct ImportContent: View {
     }
 }
 
-private struct SettingsButton: View {
+struct SettingsButton: View {
     @Binding var showSettings: Bool
     var body: some View {
         Button { showSettings = true } label: { Image(systemName: "slider.horizontal.3") }
@@ -66,75 +63,158 @@ private struct SettingsButton: View {
     }
 }
 
+/// Small time + frame-count label laid over a photo.
+struct PhotoLabel: View {
+    let title: String
+    var count: Int = 1
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(title)
+            if count > 1 {
+                Image(systemName: "square.stack").imageScale(.small)
+                Text("\(count)")
+            }
+        }
+        .font(.caption.weight(.semibold).monospacedDigit())
+        .foregroundStyle(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.black.opacity(0.45), in: Capsule())
+        .padding(10)
+    }
+}
+
 // MARK: - Days
 
-private struct DaysList: View {
+private struct DaysFeed: View {
     @ObservedObject var model: ImportModel
 
     var body: some View {
-        List {
-            Section {
+        ScrollView {
+            LazyVStack(spacing: 14) {
                 ForEach(model.days) { day in
                     NavigationLink(value: DayRef(id: day.id)) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(day.title).font(.headline)
-                                Spacer()
-                                Text(day.shotIDs.count == 1 ? "1 shot" : "\(day.shotIDs.count) shots")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            if let span = model.dayTimeSpan(day) {
-                                Text(span).font(.caption).foregroundStyle(.secondary)
-                            }
-                            ThumbStrip(model: model, ids: day.sampleIDs, total: day.shotIDs.count)
-                        }
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
+                        DayCollage(model: model, day: day)
                     }
+                    .buttonStyle(.plain)
                 }
-            } footer: {
-                if model.skippedNonRAW > 0 {
-                    Text("\(model.skippedNonRAW) non-RAW files skipped")
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 16)
+        }
+    }
+}
+
+/// One large photo and two small ones, spread across the day, with the date over the photo.
+private struct DayCollage: View {
+    @ObservedObject var model: ImportModel
+    let day: ImportModel.Day
+
+    var body: some View {
+        let samples = day.sampleIDs
+        GeometryReader { geo in
+            HStack(spacing: 2) {
+                PreviewImage(shot: samples.first.flatMap { model.shots[$0] })
+                    .frame(width: samples.count > 1 ? geo.size.width * 2 / 3 - 1 : geo.size.width)
+                if samples.count > 1 {
+                    VStack(spacing: 2) {
+                        ForEach(samples.dropFirst(), id: \.self) { id in
+                            PreviewImage(shot: model.shots[id])
+                        }
+                    }
+                    .frame(width: geo.size.width / 3 - 1)
                 }
             }
         }
+        .frame(height: 280)
+        .overlay(alignment: .bottom) {
+            LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 90)
+                .allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottomLeading) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(day.title).font(.title3.weight(.semibold))
+                Text(subtitle).font(.caption)
+            }
+            .foregroundStyle(.white)
+            .padding(14)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .contentShape(Rectangle())
+    }
+
+    private var subtitle: String {
+        let shots = day.shotIDs.count == 1 ? "1 shot" : "\(day.shotIDs.count) shots"
+        return [shots, model.dayTimeSpan(day)].compactMap { $0 }.joined(separator: " · ")
     }
 }
 
 // MARK: - Moments of one day
 
-private struct MomentsView: View {
+private struct MomentsFeed: View {
     @ObservedObject var model: ImportModel
     let dayID: String
     @Binding var showSettings: Bool
 
     var body: some View {
-        List {
-            Section {
-                if model.dayProcessed < model.order.count {
-                    ProgressView(value: Double(model.dayProcessed), total: Double(max(model.order.count, 1))) {
-                        Text("Reading previews \(model.dayProcessed) of \(model.order.count)")
-                            .font(.subheadline)
-                    } currentValueLabel: {
-                        if let left = model.previewTimeRemaining {
-                            Text(left < 60 ? "About \(Int(left.rounded())) s left" : "About \(Int((left / 60).rounded())) min left")
-                        }
+        ScrollView {
+            LazyVStack(spacing: 3) {
+                ForEach(model.moments, id: \.first) { ids in
+                    NavigationLink(value: MomentRef(ids: ids)) {
+                        MomentTile(model: model, ids: ids)
                     }
-                }
-            } footer: {
-                Text("\(model.moments.count) moments from \(model.order.count) shots")
-            }
-
-            ForEach(model.moments, id: \.first) { ids in
-                NavigationLink(value: MomentRef(ids: ids)) {
-                    MomentRow(model: model, ids: ids)
+                    .buttonStyle(.plain)
                 }
             }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.dayProcessed < model.order.count { progress }
         }
         .navigationTitle(model.days.first { $0.id == dayID }?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { SettingsButton(showSettings: $showSettings) }
         .onAppear { if model.selectedDayID != dayID { model.select(dayID: dayID) } }
+    }
+
+    private var progress: some View {
+        VStack(spacing: 4) {
+            ProgressView(value: Double(model.dayProcessed), total: Double(max(model.order.count, 1)))
+            Text(progressText).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
+
+    private var progressText: String {
+        var text = "Reading previews \(model.dayProcessed) of \(model.order.count)"
+        if let left = model.previewTimeRemaining {
+            text += left < 60 ? " · about \(Int(left.rounded())) s" : " · about \(Int((left / 60).rounded())) min"
+        }
+        return text
+    }
+}
+
+/// A moment as one full-width photo (its middle frame for now; the suggested pick later).
+private struct MomentTile: View {
+    @ObservedObject var model: ImportModel
+    let ids: [String]
+
+    var body: some View {
+        let hero = ids[ids.count / 2]
+        PreviewImage(shot: model.shots[hero])
+            .aspectRatio(model.aspect(hero), contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .overlay(alignment: .bottomLeading) {
+                PhotoLabel(title: time, count: ids.count)
+            }
+            .contentShape(Rectangle())
+    }
+
+    private var time: String {
+        ids.first.flatMap { model.shots[$0]?.date }?.formatted(date: .omitted, time: .shortened) ?? ""
     }
 }
 
@@ -194,85 +274,3 @@ private struct ConnectView: View {
     }
 }
 
-// MARK: - Moment row
-
-private struct MomentRow: View {
-    @ObservedObject var model: ImportModel
-    let ids: [String]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(timeText).font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(ids.count == 1 ? "1 shot" : "\(ids.count) shots")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            ThumbStrip(model: model, ids: model.samples(of: ids), total: ids.count)
-        }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-    }
-
-    private var timeText: String {
-        let dates = ids.compactMap { model.shots[$0]?.date }
-        guard let first = dates.min(), let last = dates.max() else { return ids.first ?? "" }
-        let start = first.formatted(date: .omitted, time: .shortened)
-        let span = last.timeIntervalSince(first)
-        if span < 1 { return start }
-        if span < 60 { return "\(start) · \(Int(span.rounded())) s" }
-        return "\(start) – \(last.formatted(date: .omitted, time: .shortened))"
-    }
-}
-
-/// A fixed row of sample thumbnails plus "+N". Not scrollable, so the whole row stays tappable.
-struct ThumbStrip: View {
-    @ObservedObject var model: ImportModel
-    let ids: [String]
-    let total: Int
-    var cell = CGSize(width: 64, height: 48)
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(ids, id: \.self) { id in
-                ShotThumbnail(shot: model.shots[id], height: cell.height, fillWidth: cell.width)
-            }
-            if total > ids.count {
-                Text("+\(total - ids.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 4)
-            }
-            Spacer(minLength: 0)
-        }
-        .frame(height: cell.height)
-    }
-}
-
-struct ShotThumbnail: View {
-    let shot: ImportModel.Shot?
-    let height: CGFloat
-    /// When set, the image fills a fixed-width cell (cropped); otherwise it keeps its aspect ratio.
-    var fillWidth: CGFloat? = nil
-
-    var body: some View {
-        let width = fillWidth ?? height * 1.5
-        Group {
-            if let image = shot?.thumbnail {
-                if fillWidth != nil {
-                    Image(uiImage: image).resizable().scaledToFill()
-                        .frame(width: width, height: height).clipped()
-                } else {
-                    Image(uiImage: image).resizable().scaledToFit()
-                }
-            } else if shot?.error != nil {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                    .frame(width: width, height: height)
-            } else {
-                Rectangle().fill(.quaternary).frame(width: width, height: height)
-            }
-        }
-        .frame(height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 3))
-    }
-}
