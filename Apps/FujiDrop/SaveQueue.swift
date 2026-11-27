@@ -5,7 +5,8 @@ import UIKit
 
 /// Saves selections to Photos one at a time in the background: get the RAF (shared with
 /// compare's cache), render a full-size JPEG on the phone, then save both as one RAW+JPEG
-/// asset with the RAF as the editing base. About 3 s per pick; less if compare already
+/// asset with the RAF as the editing base. A merged HDR frame saves its DNG and the JPEG the
+/// merge rendered the same way (the DNG is the editing base). About 3 s per pick; less if compare already
 /// downloaded and decoded the RAF. The next pick's RAF downloads while this one renders.
 ///
 /// Survives unplugging: `ImportModel.rawURL` waits for the camera to come back. Ending the
@@ -238,6 +239,19 @@ final class SaveQueue: ObservableObject {
         prefetch?.cancel()
         if let next = pending.dropFirst().first {
             prefetch = Task { [model] in _ = await model.rawURL(next.id) }
+        }
+
+        // A merged HDR frame already has its JPEG, rendered from the DNG by the merge.
+        let mergedJPEG = shot.isMerged ? cached.deletingPathExtension().appendingPathExtension("JPG") : nil
+        if let mergedJPEG {
+            let jpeg = folder.appendingPathComponent(mergedJPEG.lastPathComponent)
+            if (try? FileManager.default.linkItem(at: mergedJPEG, to: jpeg)) == nil {
+                try FileManager.default.copyItem(at: mergedJPEG, to: jpeg)
+            }
+            let assetID = try await PhotoSaver.savePair(jpeg: jpeg, raw: raw, creationDate: shot.date)
+            model.markSaved(key: item.key, assetID: assetID)
+            model.camera.record(String(format: "Saved %@ (HDR DNG) to Photos in %.1f s", item.id, Date().timeIntervalSince(started)))
+            return
         }
 
         // Render the full-size JPEG off the main actor, reusing compare's decode if any.

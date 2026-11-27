@@ -1,4 +1,3 @@
-#if os(iOS)
 import CoreImage
 import Foundation
 import ImageIO
@@ -105,4 +104,3 @@ public enum RAWRenderer {
         return out
     }
 }
-#endif

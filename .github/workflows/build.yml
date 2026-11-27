@@ -28,6 +28,12 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Download an X-T1 RAF for the LibRaw decode test
+        run: |
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/xt1.RAF" \
+            https://raw.pixls.us/download/data/Fujifilm/X-T1/20171229_110916.RAF
+          echo "FUJIDROP_TEST_RAF=$RUNNER_TEMP/xt1.RAF" >> "$GITHUB_ENV"
+
       - name: FujiDropKit unit tests (macOS)
         run: swift test --package-path Packages/FujiDropKit
 

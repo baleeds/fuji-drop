@@ -6,6 +6,60 @@ LibRaw's Markesteijn demosaic instead of Apple's RAW engine, because X-Trans ren
 many editors. Written Nov 27, 2026 for a session on the local Mac, which has the X-T1, the
 iPhone, Xcode and a desktop editor. Read `docs/HANDOFF.md` first for how the app works.
 
+## Status (Nov 27, 2026): HDR path built, DNG saves not yet; nothing checked on the phone
+
+Built ahead of the reordered plan: steps 1, 4, 5 and 6, plus step 2's **half-float** format.
+**Not built: step 3** (DNG for every save) and step 2's **16-bit integer** format. Verified on the Mac with the owner's own brackets
+(DSCF2729–2731, handheld AE BKT ±1; DSCF2527–2529, AE BKT with auto ISO and people walking):
+aligned, ghost-free at 100 %, brightness matching the camera's JPEG, about 10 s per bracket on
+an M-series Mac. Not yet run on the iPhone: check merge time, memory, and that Photos accepts
+the DNG as the RAW of a RAW+JPEG pair.
+
+Code: `HDR/` in FujiDropKit (`XTransDecoder`, `HDRMerger`, `ColorCleanup`, `DNGWriter`,
+`HDRPipeline`, `MergeCache`, `Acknowledgements`), `Moments/Brackets.swift`, and in the app
+`ImportModel` (brackets, merged frames), `MomentViewer` (Merge button) and `SaveQueue`.
+Real-file tests: `FUJIDROP_TEST_RAF=<raf>` and `FUJIDROP_TEST_BRACKET=<raf>,<raf>,<raf>`
+(optionally `FUJIDROP_TEST_OUT=<dir>`), best with `swift test -c release`.
+
+Where the build differs from the plan below, and why:
+
+- **Decode in parallel bands.** LibRaw's Markesteijn is single-threaded without OpenMP: 8 s
+  per X-T1 frame on one Mac core. The decoder runs 4 LibRaw instances on overlapping
+  `cropbox` bands (aligned to the 6×6 X-Trans pattern) and stitches them: 2.2 s. LibRaw is
+  unchanged. Output matches a whole-frame decode except along LibRaw's own internal tile
+  seams, which move.
+- **Frames stay 16-bit** (LibRaw's white-balanced output plus its multipliers), ~96 MB each
+  instead of 192 MB as floats; the merge converts strip by strip. `adjust_maximum_thr = 0`
+  so every frame and band uses the same white point.
+- **Bracket rule needs exposure compensation to change too.** EV differences alone flagged
+  many bursts on the owner's cards (auto ISO drifting a stop mid-burst). Every frame must
+  differ from every other in both ExposureBiasValue (≥ 0.6) and captured EV (≥ 0.5). AE BKT
+  and dial brackets record the bias; a full-manual bracket (shutter only) isn't found.
+  Brackets are found over the day's time order, and moments that split one are rejoined.
+- **Warping happens while merging** (bilinear, from the inverted Vision homography), so no
+  warped copies are kept. Vision's `warpTransform` maps floating → reference in
+  bottom-left-origin coordinates (checked with a synthetic shift).
+- **Deghosting compares per colour channel**, on an 8× smaller grid. Luminance alone missed
+  a leg moving over ferns (same brightness, different colour).
+- **DNG: `WhiteLevel` 1 is required** (Core Image renders float data without it as black,
+  though the spec makes it the default), and **uncompressed**: Core Image can't decode
+  Deflate-compressed float DNGs with any predictor (3, 34894, 34895; tifffile reads all of
+  them). So a merge is ~100 MB. The Deflate path is kept behind `compress:` for desktop use.
+- **BaselineExposure** is measured by rendering a ¼-size DNG of the merge with Core Image
+  against the reference frame's embedded JPEG; the same render makes the 1024 px preview.
+  The pairing JPEG is rendered from the DNG with `RAWRenderer` (now cross-platform).
+- **The merged frame's "RAW" is its DNG**: `rawURL` returns it (merging again if the cache
+  was pruned), so compare and `SaveQueue` work unchanged; saving reuses the merge's JPEG.
+  Merges are kept in `Caches/Merges` (8 most recent) and remembered in `merges.v1`.
+
+Still to do: step 3 and the integer DNG format; on-device timing and memory; Photos accepting
+the DNG pair; `dng_validate` and a desktop editor check (Lightroom / Capture One); the
+high-ISO and DR-mode fixtures from the list below.
+
+**Before building step 3:** check that Core Image decodes a Deflate-compressed 16-bit
+*integer* LinearRaw DNG (Predictor 2). It refused every compressed *float* variant, and the
+step's 45–55 MB size target depends on compression; uncompressed integer would be ~95 MB.
+
 ## Decisions already made
 
 - **Scope:** DNG output for HDR merges, plus an optional "save as DNG" format for ordinary
@@ -115,8 +169,9 @@ It supports two sample formats: **16-bit integer**, for single saves (step 3, bu
   - `PhotometricInterpretation = 34892` (LinearRaw), `SamplesPerPixel = 3`.
   - Single saves: `SampleFormat = 1`, `BitsPerSample = 16`, `WhiteLevel = 65535`,
     `Compression = 8` (Deflate) with `Predictor = 2` (horizontal differencing).
-  - Merges: `SampleFormat = 3`, `BitsPerSample = 16` (half float, as HDRMerge uses), Deflate with
-    `Predictor = 34894` (floating point, x2).
+  - Merges: `SampleFormat = 3`, `BitsPerSample = 16` (half float, as HDRMerge uses),
+    **uncompressed**: Core Image can't decode Deflate float DNGs (see Status). `WhiteLevel` 1
+    must be written for Core Image even though the spec makes it the default.
   - Tiles of 256×256. Start uncompressed and add compression once the file validates.
 - **Required tags:**
   - `DNGVersion 1.4.0.0`. `DNGBackwardVersion` is 1.4.0.0 for float data, 1.1.0.0 is enough for
@@ -125,8 +180,8 @@ It supports two sample formats: **16-bit integer**, for single saves (step 3, bu
   - `ColorMatrix1` = LibRaw `cam_xyz` (3×3, rows normalized as LibRaw has them), with
     `CalibrationIlluminant1 = 21` (D65; LibRaw's Adobe matrices are D65).
   - `AsShotNeutral` = 1 / camMul, normalized to green = 1.
-  - Float data ignores `WhiteLevel` / `BlackLevel`: scale merged values so the brightest value is
-    1.0. Integer data has black at 0 (already subtracted by LibRaw) and white at 65535.
+  - Float data: scale merged values so the brightest value is 1.0 and write `WhiteLevel` 1
+    (Core Image needs it; the spec says it's the default). Integer data has black at 0 (already subtracted by LibRaw) and white at 65535.
   - Set `BaselineExposure` so the frame's mid-tones render as they did at capture (for merges, the
     reference frame's), plus the DR offset. Use the existing `Brightness.stops` against the reference frame's
     embedded JPEG; that's the same logic `RAWRenderer.matchExposure` uses for DR200/DR400.

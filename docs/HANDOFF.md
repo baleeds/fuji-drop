@@ -126,4 +126,8 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
    Saved picks are remembered by `Shot.key` (`saved.v1`) and shown with a green check.
    Still to do: location borrowed from nearby iPhone photos (estimate the camera clock offset).
 4. Share: hand off to Instagram via the share sheet.
-5. LibRaw decoding: an optional "save as DNG" format, then HDR bracket merge, see `docs/HDR-PLAN.md`.
+5. LibRaw decoding: an optional "save as DNG" format, then HDR bracket merge, see
+   `docs/HDR-PLAN.md` (status section first). The HDR merge is built (Nov 27, 2026, **not yet
+   checked on device**): brackets get a "Bracket" label and skip ranking; Merge in the viewer
+   adds an "HDR" frame that compares, selects and saves like any other (DNG + JPEG). Settings ›
+   Acknowledgements has LibRaw's notice. The "save as DNG" option (plan step 3) isn't built yet.

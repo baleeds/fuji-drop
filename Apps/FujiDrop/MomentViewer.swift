@@ -11,6 +11,9 @@ import UIKit
 /// filmstrip marks which pane each frame is in and picks the second pane; Swap exchanges
 /// them. Single-frame moments have no
 /// filmstrip or compare.
+///
+/// A moment with an exposure bracket offers Merge: the bracket's RAFs are merged into an HDR
+/// frame (a linear DNG), which then joins the moment and is shown.
 struct MomentViewer: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
@@ -21,10 +24,13 @@ struct MomentViewer: View {
     /// The second pane while comparing; nil when not comparing.
     @State private var challenger: String?
     @State private var group = ZoomGroup()
+    /// The HDR frame to show once the merge started here finishes.
+    @State private var awaitedMerge: String?
 
     var body: some View {
-        // Only the frames still on the card (after reconnecting, some may be gone).
-        let frames = model.onCard(ids)
+        // Only the frames still on the card (after reconnecting, some may be gone), as the
+        // moment is now (a merge adds its HDR frame).
+        let frames = model.onCard(model.liveMoment(ids))
         if frames.isEmpty { NotOnCardView() } else { viewer(frames) }
     }
 
@@ -57,12 +63,31 @@ struct MomentViewer: View {
                 }
             }
         }
+        .overlay(alignment: .top) { mergeStatus(bracket(ids, shown: shown)) }
+        .onChange(of: ids) {
+            if let awaitedMerge, ids.contains(awaitedMerge) {
+                current = awaitedMerge
+                challenger = nil
+                self.awaitedMerge = nil
+            }
+        }
         .background(.black)
         .navigationTitle(title(ids, shown: shown, other: other))
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.black, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
+            if let bracket = bracket(ids, shown: shown), !model.isMerged(bracket),
+               model.merging[model.mergeKey(bracket)] == nil {
+                Button {
+                    awaitedMerge = model.mergedID(bracket)
+                    model.merge(bracket)
+                } label: {
+                    Label("Merge", systemImage: "square.3.layers.3d")
+                        .labelStyle(.titleAndIcon)
+                }
+                .accessibilityHint("Merges the exposure bracket into one HDR photo")
+            }
             if ids.count > 1 {
                 Button {
                     challenger = other == nil ? model.challenger(for: shown, in: ids, ranking: ranking) : nil
@@ -70,6 +95,40 @@ struct MomentViewer: View {
                     Label(other == nil ? "Compare" : "Done", systemImage: "square.split.1x2")
                         .labelStyle(.titleAndIcon)
                 }
+            }
+        }
+    }
+
+    /// The bracket Merge acts on: the shown frame's, else the moment's first one not merged.
+    private func bracket(_ ids: [String], shown: String) -> [String]? {
+        if let b = model.bracket(of: shown) { return b }
+        return ids.lazy.compactMap { model.bracket(of: $0) }.first { !model.isMerged($0) }
+    }
+
+    /// Merge progress or failure (with Retry) over the top of the viewer.
+    @ViewBuilder private func mergeStatus(_ bracket: [String]?) -> some View {
+        if let bracket {
+            switch model.merging[model.mergeKey(bracket)] {
+            case .running(let step):
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small).tint(.white)
+                    Text("HDR · \(step)")
+                }
+                .font(.caption.weight(.semibold))
+                .photoCapsule()
+            case .failed(let reason):
+                HStack(spacing: 8) {
+                    Label("Merge failed: \(reason)", systemImage: "exclamationmark.triangle.fill")
+                    Button("Retry") {
+                        awaitedMerge = model.mergedID(bracket)
+                        model.merge(bracket)
+                    }
+                    .bold()
+                }
+                .font(.caption.weight(.semibold))
+                .photoCapsule()
+            case nil:
+                EmptyView()
             }
         }
     }
@@ -91,7 +150,7 @@ struct MomentViewer: View {
 
     /// Moves to the next (+1) or previous (-1) frame after a swipe.
     private func step(_ delta: Int) {
-        let frames = model.onCard(ids)
+        let frames = model.onCard(model.liveMoment(ids))
         let shown = current ?? model.hero(of: frames)
         guard let i = frames.firstIndex(of: shown), frames.indices.contains(i + delta) else { return }
         current = frames[i + delta]
@@ -187,6 +246,10 @@ private struct ViewerPane: View {
                     .overlay(alignment: .bottomLeading) {
                         VStack(alignment: .leading, spacing: -14) {
                             FlawTip(flaws: flaws)
+                            if shot?.isMerged == true {
+                                Text("HDR").font(.caption2.weight(.bold)).photoCapsule()
+                                    .accessibilityLabel("Merged HDR frame")
+                            }
                             if let details { PhotoLabel(title: details) }
                             if loadsRAW { rawBadge }
                         }
@@ -348,6 +411,7 @@ private struct Filmstrip: View {
         if id == challenger { parts.append("bottom pane") }
         if challenger == nil, id == current { parts.append("shown") }
         if id == suggested { parts.append("suggested") }
+        if model.shots[id]?.isMerged == true { parts.append("HDR") }
         if model.isSelected(id) { parts.append("selected") }
         return parts.joined(separator: ", ")
     }
@@ -363,6 +427,16 @@ private struct Filmstrip: View {
                         .foregroundStyle(.yellow)
                         .shadow(color: .black.opacity(0.6), radius: 1)
                         .padding(4)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if model.shots[id]?.isMerged == true {
+                    Text("HDR")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .background(.black.opacity(0.6), in: Capsule())
+                        .padding(3)
                 }
             }
             .overlay(alignment: .topLeading) {

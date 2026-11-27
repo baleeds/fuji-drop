@@ -51,6 +51,7 @@ struct TuningView: View {
                 }
                 Section {
                     NavigationLink("Log (\(log.count))") { LogView(log: log) }
+                    NavigationLink("Acknowledgements") { AcknowledgementsView() }
                     Button("Disconnect camera", role: .destructive, action: disconnect)
                 }
             }
@@ -80,6 +81,18 @@ struct TuningView: View {
 
     private func float(_ binding: Binding<Float>) -> Binding<Double> {
         Binding(get: { Double(binding.wrappedValue) }, set: { binding.wrappedValue = Float($0) })
+    }
+}
+
+/// Notices for third-party code (LibRaw, under CDDL 1.0, and the code it includes).
+private struct AcknowledgementsView: View {
+    var body: some View {
+        List(Acknowledgements.notices) { notice in
+            Section(notice.title) {
+                Text(notice.text).font(.caption).textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Acknowledgements")
     }
 }
 

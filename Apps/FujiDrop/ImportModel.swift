@@ -37,6 +37,14 @@ final class ImportModel: ObservableObject {
         /// Scoring failed; the shot is left out of ranking rather than holding it up.
         var scoreFailed = false
         var error: String?
+        /// Exposure settings from the preview's EXIF, for finding brackets.
+        var exposure: Exposure?
+        /// A merged HDR frame: the bracket's frame ids, in time order. Nil for camera frames.
+        /// Its `raw` is the first frame's file (only for its size); it's never read from the
+        /// camera, and its "RAW" is the merged DNG (`rawURL`).
+        var mergedFrom: [String]?
+
+        var isMerged: Bool { mergedFrom != nil }
 
         var size: Int64 { Int64(raw.fileSize) }
         var isProcessed: Bool { thumbnail != nil || error != nil }
@@ -52,6 +60,7 @@ final class ImportModel: ObservableObject {
             print = old.print
             score = old.score
             scoreFailed = old.scoreFailed
+            exposure = old.exposure
         }
     }
 
@@ -115,6 +124,23 @@ final class ImportModel: ObservableObject {
     lazy var saves = SaveQueue(model: self)
     @Published var grouper = MomentGrouper() {
         didSet { if grouper != oldValue { regroup() } }
+    }
+    /// Exposure brackets of the selected day (frame ids in time order), and each frame's.
+    @Published private(set) var brackets: [[String]] = []
+    private var bracketOf: [String: Int] = [:]
+    let bracketFinder = BracketFinder()
+    /// HDR merges running or failed, by merge key (see `mergeKey`).
+    @Published private(set) var merging: [String: MergeState] = [:]
+    private var mergeTasks: [String: Task<MergeCache.Entry?, Never>] = [:]
+    private let mergeCache = MergeCache()
+    /// Brackets merged at some point, by merge key, so their HDR frame shows (and is rebuilt
+    /// if the cache was pruned) whenever the day is open.
+    private var knownMerges = Set(UserDefaults.standard.stringArray(forKey: ImportModel.mergesKey) ?? [])
+    private static let mergesKey = "merges.v1"
+
+    enum MergeState: Equatable {
+        case running(String)
+        case failed(String)
     }
 
     /// When preview reading for the selected day started, and how many were already done then.
@@ -224,6 +250,9 @@ final class ImportModel: ObservableObject {
         connection = .none
         days = []; selectedDayID = nil; shots = [:]; order = []; moments = []
         previewStart = nil; distanceCache = [:]
+        brackets = []; bracketOf = [:]
+        mergeTasks.values.forEach { $0.cancel() }
+        mergeTasks = [:]; merging = [:]
     }
 
     /// Stops everything that talks to the camera. Analysis of previews already on disk
@@ -384,11 +413,14 @@ final class ImportModel: ObservableObject {
         decodeLogCount += 1
         Task { [weak self] in
             let t0 = Date()
-            let thumb = await Background.decode { ImageLoading.thumbnail(at: url, maxPixelSize: 360) }
+            let (thumb, exposure) = await Background.decode {
+                (ImageLoading.thumbnail(at: url, maxPixelSize: 360), Exposure(contentsOf: url))
+            }
             if logDetail {
                 self?.camera.record(String(format: "Decode %@: %@ in %.2f s", id, thumb == nil ? "failed" : "ok", Date().timeIntervalSince(t0)))
             }
             guard let self, self.finishThumbnail(id, key: key, thumb) else { return }
+            self.update(id, key: key) { $0.exposure = exposure }
             let t1 = Date()
             let print = await Background.vision { () -> FeaturePrint? in
                 guard let small = ImageLoading.thumbnail(at: url, maxPixelSize: 512) else { return nil }
@@ -453,6 +485,9 @@ final class ImportModel: ObservableObject {
     /// The shot's RAF if it's already downloaded.
     func cachedRawURL(_ id: String) -> URL? {
         guard let shot = shots[id] else { return nil }
+        if let sources = shot.mergedFrom {
+            return mergeCache.entry(key: mergeKey(sources), name: id)?.dng
+        }
         return rawCache.cachedURL(name: id, size: shot.size)
     }
 
@@ -462,6 +497,8 @@ final class ImportModel: ObservableObject {
     /// fails, the file is no longer on the card, the session ends, or the caller is cancelled.
     func rawURL(_ id: String) async -> URL? {
         guard let key = shots[id]?.key else { return nil }
+        // A merged frame's RAW is its DNG, merged again if the cache lost it.
+        if let sources = shots[id]?.mergedFrom { return await mergedEntry(sources)?.dng }
         while !Task.isCancelled {
             guard shots[id]?.key == key else { return nil }
             if let cached = cachedRawURL(id) { return cached }
@@ -550,9 +587,168 @@ final class ImportModel: ObservableObject {
         let items = order.enumerated().compactMap { index, id in
             shots[id].map { ($0, $0.date ?? Date(timeIntervalSinceReferenceDate: -1e9 + Double(index) * 86400)) }
         }
-        moments = grouper
+        var grouped = grouper
             .group(items, date: { $0.1 }, distance: { [self] a, b in distance(a.0, b.0) })
             .map { $0.map { $0.0.id } }
+
+        // Brackets, kept within one moment, each followed by its HDR frame once merged.
+        let ranges = bracketFinder.find(items, date: { $0.0.date }, exposure: { $0.0.exposure },
+                                        distance: { [self] a, b in distance(a.0, b.0) })
+        let found = ranges.map { r in items[r].map { $0.0.id } }
+        if found != brackets { brackets = found }
+        bracketOf = [:]
+        for (i, ids) in found.enumerated() { for id in ids { bracketOf[id] = i } }
+        grouped = BracketFinder.keepTogether(grouped, brackets: found)
+        for ids in found where knownMerges.contains(mergeKey(ids)) {
+            let merged = addMergedShot(ids)
+            if let m = grouped.firstIndex(where: { $0.contains(ids.last!) }),
+               let i = grouped[m].firstIndex(of: ids.last!) {
+                grouped[m].insert(merged, at: i + 1)
+            }
+        }
+        moments = grouped
+    }
+
+    // MARK: Brackets and HDR merges
+
+    /// The bracket a frame belongs to (frame ids in time order), if any.
+    func bracket(of id: String) -> [String]? {
+        if let sources = shots[id]?.mergedFrom { return sources }
+        return bracketOf[id].map { brackets[$0] }
+    }
+
+    /// Stable key of a bracket's merge: its frames' exact files.
+    func mergeKey(_ ids: [String]) -> String {
+        MergeCache.key(for: ids.map { shots[$0]?.key ?? $0 })
+    }
+
+    /// The merged frame's id for a bracket, e.g. `DSCF2729-HDR`.
+    func mergedID(_ ids: [String]) -> String { "\(ids.first ?? "")-HDR" }
+
+    func isMerged(_ ids: [String]) -> Bool { knownMerges.contains(mergeKey(ids)) }
+
+    /// The reference (middle exposure) frame of a bracket.
+    func referenceFrame(_ ids: [String]) -> String? {
+        let exposures = ids.compactMap { shots[$0]?.exposure }
+        guard exposures.count == ids.count, !ids.isEmpty else { return ids.first }
+        return ids[BracketFinder.referenceIndex(exposures)]
+    }
+
+    /// Adds (or refreshes) the synthetic HDR frame for a merged bracket and returns its id.
+    @discardableResult
+    private func addMergedShot(_ ids: [String]) -> String {
+        let id = mergedID(ids)
+        let key = "\(cameraID ?? "")/merge-\(mergeKey(ids))"
+        guard let first = ids.first.flatMap({ shots[$0] }) else { return id }
+        let entry = mergeCache.entry(key: mergeKey(ids), name: id)
+        if var existing = shots[id], existing.key == key {
+            if existing.previewURL != entry?.jpeg {
+                existing.previewURL = entry?.jpeg
+                shots[id] = existing
+                if let jpeg = entry?.jpeg { loadMergedThumbnail(id, key: key, url: jpeg) }
+            }
+            return id
+        }
+        let reference = referenceFrame(ids).flatMap { shots[$0] }
+        var shot = Shot(id: id, raw: first.raw, date: first.date, key: key)
+        shot.mergedFrom = ids
+        shot.previewURL = entry?.jpeg
+        // The reference frame's thumbnail stands in until the merged one decodes (or while
+        // a pruned merge is rebuilt).
+        shot.thumbnail = reference?.thumbnail
+        shot.exposure = reference?.exposure
+        shots[id] = shot
+        if let jpeg = entry?.jpeg { loadMergedThumbnail(id, key: key, url: jpeg) }
+        // Selected but not yet saved (e.g. cut off by an unplug): carry on.
+        if picks.contains(key), saved[key] == nil { saves.save([id]) }
+        return id
+    }
+
+    private func loadMergedThumbnail(_ id: String, key: String, url: URL) {
+        Task {
+            let thumb = await Background.decode { ImageLoading.thumbnail(at: url, maxPixelSize: 360) }
+            if let thumb { update(id, key: key) { $0.thumbnail = UIImage(cgImage: thumb) } }
+        }
+    }
+
+    /// Starts merging a bracket (the Merge button). Progress and failures are in `merging`;
+    /// when done the HDR frame appears in its moment.
+    func merge(_ ids: [String]) {
+        Task { _ = await mergedEntry(ids) }
+    }
+
+    /// The bracket's merged DNG and JPEG: cached, or merged now (shared by concurrent callers).
+    /// Downloads the RAFs (waiting out an unplug), then decodes and merges them on the RAW
+    /// queue: about 10 s on a Mac, longer on the phone.
+    func mergedEntry(_ ids: [String]) async -> MergeCache.Entry? {
+        let key = mergeKey(ids), name = mergedID(ids)
+        let cache = mergeCache
+        if let entry = await Background.decode({ cache.entry(key: key, name: name) }) { return entry }
+        if let running = mergeTasks[key] { return await running.value }
+        let task = Task { [weak self] () -> MergeCache.Entry? in
+            guard let self else { return nil }
+            return await self.runMerge(ids, key: key, name: name)
+        }
+        mergeTasks[key] = task
+        let entry = await task.value
+        if mergeTasks[key] == task { mergeTasks[key] = nil }
+        return entry
+    }
+
+    private func runMerge(_ ids: [String], key: String, name: String) async -> MergeCache.Entry? {
+        let started = Date()
+        func fail(_ reason: String) -> MergeCache.Entry? {
+            merging[key] = .failed(reason)
+            camera.record("HDR \(name) failed: \(reason)")
+            return nil
+        }
+        // Work from hard links in our own folder: the RAF cache keeps only a few files and
+        // other downloads may prune these mid-merge.
+        let work = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Merge-\(key)", isDirectory: true)
+        try? FileManager.default.removeItem(at: work)
+        try? FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+        var raws: [URL] = []
+        for (i, id) in ids.enumerated() {
+            merging[key] = .running("Downloading \(i + 1) of \(ids.count)")
+            guard let cached = await rawURL(id) else {
+                return Task.isCancelled ? nil : fail("Couldn't download \(id)")
+            }
+            let link = work.appendingPathComponent(cached.lastPathComponent)
+            if (try? FileManager.default.linkItem(at: cached, to: link)) == nil {
+                guard (try? FileManager.default.copyItem(at: cached, to: link)) != nil else { return fail("Couldn't copy \(id)") }
+            }
+            raws.append(link)
+        }
+        let previews = ids.map { shots[$0]?.previewURL }
+        let folder = mergeCache.folder(key: key)
+        let sources = raws
+        merging[key] = .running("Merging")
+        let report: @Sendable (String) -> Void = { [weak self] step in
+            Task { @MainActor in
+                if case .running = self?.merging[key] { self?.merging[key] = .running(step) }
+            }
+        }
+        let result = await Background.raw { () -> Result<HDRPipeline.Output, Error> in
+            Result { try HDRPipeline.run(raws: sources, previews: previews, name: name, into: folder, progress: report) }
+        }
+        switch result {
+        case .failure(let error):
+            try? FileManager.default.removeItem(at: folder)
+            return fail(error.localizedDescription)
+        case .success(let output):
+            merging[key] = nil
+            output.report.forEach { camera.record("HDR \(name): \($0)") }
+            camera.record(String(format: "HDR %@: done in %.1f s", name, Date().timeIntervalSince(started)))
+            knownMerges.insert(key)
+            UserDefaults.standard.set(Array(knownMerges), forKey: Self.mergesKey)
+            let cache = mergeCache
+            Task.detached(priority: .utility) { cache.prune() }
+            // The shot may have to pick up the new files (rebuilt after pruning).
+            if order.contains(ids[0]) { regroup() }
+            return MergeCache.Entry(dng: output.dng, jpeg: output.jpeg)
+        }
     }
 
     private func distance(_ a: Shot, _ b: Shot) -> Float? {
@@ -561,6 +757,19 @@ final class ImportModel: ObservableObject {
         guard let pa = a.print, let pb = b.print, let d = pa.distance(to: pb) else { return nil }
         distanceCache[key] = d
         return d
+    }
+
+    /// The moment as it is now: a viewer keeps the ids it was opened with, but merging adds
+    /// an HDR frame (and regrouping may change it). Falls back to `ids`.
+    func liveMoment(_ ids: [String]) -> [String] {
+        guard let first = ids.first else { return ids }
+        return moments.first { $0.contains(first) } ?? ids
+    }
+
+    /// "HDR" for a moment with a merged frame, "Bracket" for one with an unmerged bracket.
+    func bracketLabel(of ids: [String]) -> String? {
+        if ids.contains(where: { shots[$0]?.isMerged == true }) { return "HDR" }
+        return ids.contains { bracketOf[$0] != nil } ? "Bracket" : nil
     }
 
     /// A moment's label: its time, or the first file name for undated shots.
@@ -580,11 +789,12 @@ final class ImportModel: ObservableObject {
     /// (unreadable preview, scoring error) are left out rather than holding up the rest.
     /// Compute it once per render and read everything from it.
     func ranking(of ids: [String]) -> Ranking? {
-        let candidates = ids.filter { shots[$0]?.isRankable == true }
+        // Brackets skip ranking: their dark and bright frames would be flagged as flawed.
+        let candidates = ids.filter { shots[$0]?.isRankable == true && bracket(of: $0) == nil }
         let scores = candidates.compactMap { shots[$0]?.score }
         guard !candidates.isEmpty, scores.count == candidates.count else { return nil }
         let ranked = BestShot.rank(scores)
-        let best = ids.count > 1 ? BestShot.bestIndex(ranked).map { candidates[$0] } : nil
+        let best = candidates.count > 1 ? BestShot.bestIndex(ranked).map { candidates[$0] } : nil
         return Ranking(breakdowns: Dictionary(uniqueKeysWithValues: zip(candidates, ranked)), suggested: best)
     }
 
@@ -592,6 +802,10 @@ final class ImportModel: ObservableObject {
     /// middle frame that loaded (so the feed doesn't flicker or lead with a failed frame).
     func hero(of ids: [String], ranking: Ranking? = nil) -> String {
         if let pick = selected(in: ids).first ?? (ranking ?? self.ranking(of: ids))?.suggested { return pick }
+        // A bracket's merged frame, else its middle exposure.
+        if let merged = ids.first(where: { shots[$0]?.isMerged == true }) { return merged }
+        if let bracket = ids.lazy.compactMap({ self.bracket(of: $0) }).first,
+           let reference = referenceFrame(bracket) { return reference }
         let usable = ids.filter { shots[$0]?.error == nil }
         let pool = usable.isEmpty ? ids : usable
         return pool[pool.count / 2]

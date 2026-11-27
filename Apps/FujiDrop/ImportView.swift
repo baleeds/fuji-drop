@@ -74,6 +74,8 @@ struct SettingsButton: View {
 struct PhotoLabel: View {
     let title: String
     var count: Int = 1
+    /// e.g. "Bracket" or "HDR".
+    var badge: String?
 
     var body: some View {
         HStack(spacing: 5) {
@@ -81,6 +83,10 @@ struct PhotoLabel: View {
             if count > 1 {
                 Image(systemName: "square.stack").imageScale(.small)
                 Text("\(count)")
+            }
+            if let badge {
+                Text("·")
+                Text(badge)
             }
         }
         .font(.caption.weight(.semibold).monospacedDigit())
@@ -323,7 +329,7 @@ private struct MomentTile: View {
             .aspectRatio(model.aspect(hero), contentMode: .fit)
             .frame(maxWidth: .infinity)
             .overlay(alignment: .bottomLeading) {
-                PhotoLabel(title: model.timeLabel(of: ids), count: ids.count)
+                PhotoLabel(title: model.timeLabel(of: ids), count: ids.count, badge: model.bracketLabel(of: ids))
             }
             .contentShape(Rectangle())
     }

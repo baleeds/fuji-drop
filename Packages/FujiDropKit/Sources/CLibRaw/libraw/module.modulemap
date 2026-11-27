@@ -1,0 +1,6 @@
+// Added for Swift (not part of LibRaw): exposes only LibRaw's C API.
+module CLibRaw {
+    header "libraw.h"
+    link "z"
+    export *
+}
