@@ -324,6 +324,11 @@ final class ImportModel: ObservableObject {
         return Dictionary(uniqueKeysWithValues: zip(ids, BestShot.rank(scores)))
     }
 
+    /// Likely reasons each frame isn't the best ("Soft focus", "Eyes closed"), once scored.
+    func flaws(in ids: [String]) -> [String: [BestShot.Flaw]] {
+        ranking(of: ids)?.mapValues(\.flaws) ?? [:]
+    }
+
     /// The suggested frame, once every frame is scored. Nil for single frames.
     func suggested(in ids: [String]) -> String? {
         guard ids.count > 1 else { return nil }

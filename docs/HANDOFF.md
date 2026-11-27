@@ -76,6 +76,10 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
    (`ZoomGroup` in `Zoomable.swift`). Winner stays: top/left is the favourite, bottom/right the
    challenger; tap the filmstrip to challenge, "Pick this" swaps, "Pick" saves. Picks persist in
    UserDefaults keyed by file name + size, one per moment; long-press a frame to pick/unpick.
+   Frames show tips for likely flaws ("Soft focus", "Eyes closed", "Face unclear";
+   `BestShot.Flaw`), which also cost 25 % of the score each. Eyes closed uses Vision landmark eye
+   outline height/width < 0.15 on faces ≥ 6 % of frame width; "eyes" in the details label shows
+   the value for calibration.
    Still to do: for close calls, download the 2 RAFs (~1.4 s each) for true 100 % crops.
 3. Save picks: `RAWRenderer` full-size JPEG + RAF via `PhotoSaver` (RAW as editing base), with
    location borrowed from nearby iPhone photos (camera clock can't be synced, so estimate offset).

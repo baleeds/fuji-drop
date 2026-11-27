@@ -99,6 +99,23 @@ struct PickedBadge: View {
     }
 }
 
+/// Why a frame is probably not the best, e.g. "Soft focus · Eyes closed".
+struct FlawTip: View {
+    let flaws: [BestShot.Flaw]
+
+    var body: some View {
+        if !flaws.isEmpty {
+            Label(flaws.map(\.title).joined(separator: " · "), systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.black.opacity(0.55), in: Capsule())
+                .padding(10)
+        }
+    }
+}
+
 /// Marks the suggested frame of a moment (until the owner picks one).
 struct SuggestedBadge: View {
     var body: some View {

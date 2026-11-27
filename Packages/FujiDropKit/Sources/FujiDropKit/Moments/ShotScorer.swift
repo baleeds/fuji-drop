@@ -12,7 +12,8 @@ public enum ShotScorer {
     public static func measure(_ image: CGImage) throws -> ShotScore {
         let faces = VNDetectFaceCaptureQualityRequest()
         let saliency = VNGenerateAttentionBasedSaliencyImageRequest()
-        try VNImageRequestHandler(cgImage: image, options: [:]).perform([faces, saliency])
+        let landmarks = VNDetectFaceLandmarksRequest()
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([faces, saliency, landmarks])
 
         let faceObservations = faces.results ?? []
         let quality = faceObservations.compactMap(\.faceCaptureQuality).max()
@@ -32,9 +33,33 @@ public enum ShotScorer {
         let topLeft = CGRect(x: region.minX, y: 1 - region.maxY, width: region.width, height: region.height)
             .intersection(unit)
 
+        let size = CGSize(width: image.width, height: image.height)
+        let eyes = (landmarks.results ?? [])
+            .filter { $0.boundingBox.width >= minFaceWidth }
+            .compactMap { eyeOpenness($0, imageSize: size) }
+            .min()
+
         guard let gray = GrayImage(image) else { throw ScoreError.noBitmap }
         return ShotScore(sharpness: Sharpness.score(gray, region: topLeft.isNull ? unit : topLeft),
-                         faceQuality: quality)
+                         faceQuality: quality, eyeOpenness: eyes)
+    }
+
+    /// Faces narrower than this fraction of the frame (people in the background) don't count
+    /// for closed eyes: their landmarks are too coarse.
+    static let minFaceWidth: CGFloat = 0.06
+
+    /// Mean of both eyes' outline height / width, in image pixels.
+    static func eyeOpenness(_ face: VNFaceObservation, imageSize: CGSize) -> Float? {
+        func ratio(_ region: VNFaceLandmarkRegion2D?) -> CGFloat? {
+            guard let points = region?.pointsInImage(imageSize: imageSize), points.count >= 4,
+                  let minX = points.map(\.x).min(), let maxX = points.map(\.x).max(),
+                  let minY = points.map(\.y).min(), let maxY = points.map(\.y).max(),
+                  maxX - minX > 1 else { return nil }
+            return (maxY - minY) / (maxX - minX)
+        }
+        let ratios = [ratio(face.landmarks?.leftEye), ratio(face.landmarks?.rightEye)].compactMap { $0 }
+        guard !ratios.isEmpty else { return nil }
+        return Float(ratios.reduce(0, +) / CGFloat(ratios.count))
     }
 
     /// Vision's overall aesthetics score (-1…1), or nil where it isn't supported.

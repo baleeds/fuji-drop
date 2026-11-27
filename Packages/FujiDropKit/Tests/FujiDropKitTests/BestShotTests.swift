@@ -101,6 +101,30 @@ final class BestShotTests: XCTestCase {
         XCTAssertEqual(ranked[0].aesthetics ?? -1, 0.6, accuracy: 1e-6)
     }
 
+    func testSoftFocusIsRelative() {
+        let ranked = BestShot.rank([ShotScore(sharpness: 100), ShotScore(sharpness: 30)])
+        XCTAssertEqual(ranked[0].flaws, [])
+        XCTAssertEqual(ranked[1].flaws, [.softFocus])
+        XCTAssertEqual(BestShot.rank([ShotScore(sharpness: 1)])[0].flaws, [], "a lone frame isn't soft")
+    }
+
+    func testClosedEyesFlaggedAndPenalised() {
+        // Equally sharp; closed eyes should lose even with a slightly better face score.
+        let scores = [ShotScore(sharpness: 100, faceQuality: 0.6, eyeOpenness: 0.08),
+                      ShotScore(sharpness: 100, faceQuality: 0.55, eyeOpenness: 0.32)]
+        let ranked = BestShot.rank(scores)
+        XCTAssertEqual(ranked[0].flaws, [.eyesClosed])
+        XCTAssertEqual(ranked[1].flaws, [])
+        XCTAssertEqual(BestShot.bestIndex(scores), 1)
+    }
+
+    func testUnclearFaceOnlyWhenAnotherFrameIsClear() {
+        XCTAssertEqual(BestShot.rank([ShotScore(sharpness: 1, faceQuality: 0.2),
+                                      ShotScore(sharpness: 1, faceQuality: 0.7)])[0].flaws, [.faceUnclear])
+        XCTAssertEqual(BestShot.rank([ShotScore(sharpness: 1, faceQuality: 0.2),
+                                      ShotScore(sharpness: 1, faceQuality: 0.25)])[0].flaws, [])
+    }
+
     func testTiesGoToEarlierFrame() {
         XCTAssertEqual(BestShot.bestIndex([ShotScore(sharpness: 10), ShotScore(sharpness: 10)]), 0)
     }

@@ -8,11 +8,16 @@ public struct ShotScore: Equatable, Sendable {
     public var faceQuality: Float?
     /// Vision's overall aesthetics score (-1…1), nil if unavailable.
     public var aesthetics: Float?
+    /// Eye openness of the least-open face big enough to matter: eye outline height / width,
+    /// averaged over both eyes (open ≈ 0.3+, closed ≈ 0.1). Nil if no such face.
+    public var eyeOpenness: Float?
 
-    public init(sharpness: Float, faceQuality: Float? = nil, aesthetics: Float? = nil) {
+    public init(sharpness: Float, faceQuality: Float? = nil, aesthetics: Float? = nil,
+                eyeOpenness: Float? = nil) {
         self.sharpness = sharpness
         self.faceQuality = faceQuality
         self.aesthetics = aesthetics
+        self.eyeOpenness = eyeOpenness
     }
 }
 
@@ -24,20 +29,53 @@ public enum BestShot {
         public var aesthetics: Float = 0.25
         /// Only applied when at least one frame of the moment has a face.
         public var face: Float = 0.20
+        /// Total is multiplied by this for each flaw.
+        public var flawPenalty: Float = 0.75
         public init() {}
     }
 
-    /// Each frame's parts, scaled 0…1, and the weighted total.
+    /// A likely reason a frame isn't the best, shown as a tip.
+    public enum Flaw: String, CaseIterable, Sendable {
+        case softFocus
+        case eyesClosed
+        case faceUnclear
+
+        public var title: String {
+            switch self {
+            case .softFocus: "Soft focus"
+            case .eyesClosed: "Eyes closed"
+            case .faceUnclear: "Face unclear"
+            }
+        }
+    }
+
+    /// Thresholds for flaws. Starting guesses; calibrate on real shots.
+    public struct FlawThresholds: Equatable, Sendable {
+        /// Relative sharpness (0…1, 1 = sharpest frame of the moment) below this is soft.
+        public var softFocus: Float = 0.7
+        /// Eye openness below this counts as closed.
+        public var eyesClosed: Float = 0.15
+        /// Face quality below this is unclear, if another frame's face reaches `goodFace`.
+        public var unclearFace: Float = 0.3
+        public var goodFace: Float = 0.5
+        public init() {}
+    }
+
+    /// Each frame's parts, scaled 0…1, its flaws, and the weighted total.
     public struct Breakdown: Equatable, Sendable {
         public var sharpness: Float
         public var aesthetics: Float?
         public var face: Float?
+        public var eyeOpenness: Float?
+        public var flaws: [Flaw]
         public var total: Float
     }
 
-    public static func rank(_ scores: [ShotScore], weights: Weights = Weights()) -> [Breakdown] {
+    public static func rank(_ scores: [ShotScore], weights: Weights = Weights(),
+                            thresholds: FlawThresholds = FlawThresholds()) -> [Breakdown] {
         let maxSharpness = scores.map(\.sharpness).max() ?? 0
         let anyFace = scores.contains { $0.faceQuality != nil }
+        let bestFace = scores.compactMap(\.faceQuality).max() ?? 0
         let anyAesthetics = scores.contains { $0.aesthetics != nil }
         return scores.map { s in
             // Laplacian variance grows with the square of edge contrast; the root is closer to
@@ -57,8 +95,19 @@ public enum BestShot {
                 total += weights.face * face
                 weight += weights.face
             }
+
+            var flaws: [Flaw] = []
+            // Soft only relative to a sharper frame, so a lone frame is never flagged.
+            if scores.count > 1, sharp < thresholds.softFocus { flaws.append(.softFocus) }
+            if let eyes = s.eyeOpenness, eyes < thresholds.eyesClosed { flaws.append(.eyesClosed) }
+            if let q = s.faceQuality, q < thresholds.unclearFace, bestFace >= thresholds.goodFace {
+                flaws.append(.faceUnclear)
+            }
+
+            var result = weight > 0 ? total / weight : 0
+            for _ in flaws { result *= weights.flawPenalty }
             return Breakdown(sharpness: sharp, aesthetics: aesthetics, face: face,
-                             total: weight > 0 ? total / weight : 0)
+                             eyeOpenness: s.eyeOpenness, flaws: flaws, total: result)
         }
     }
 

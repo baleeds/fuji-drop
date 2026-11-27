@@ -27,11 +27,14 @@ struct CompareView: View {
     var body: some View {
         let sideBySide = model.aspect(favourite, clamped: false) < 1
         let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 2)) : AnyLayout(VStackLayout(spacing: 2))
+        let flaws = model.flaws(in: ids)
         NavigationStack {
             VStack(spacing: 0) {
                 layout {
-                    ComparePane(shot: model.shots[favourite], group: group, isFavourite: true, promote: {})
-                    ComparePane(shot: model.shots[challenger], group: group, isFavourite: false) {
+                    ComparePane(shot: model.shots[favourite], flaws: flaws[favourite] ?? [], group: group,
+                                isFavourite: true, promote: {})
+                    ComparePane(shot: model.shots[challenger], flaws: flaws[challenger] ?? [], group: group,
+                                isFavourite: false) {
                         let previous = favourite
                         favourite = challenger
                         challenger = previous
@@ -69,6 +72,7 @@ struct CompareView: View {
 /// One side of the comparison: the frame's 1920 px preview, zoomable with the other side.
 private struct ComparePane: View {
     let shot: ImportModel.Shot?
+    let flaws: [BestShot.Flaw]
     let group: ZoomGroup
     let isFavourite: Bool
     let promote: () -> Void
@@ -94,6 +98,9 @@ private struct ComparePane: View {
                     .background(.black.opacity(0.45), in: Circle())
                     .padding(10)
             }
+        }
+        .overlay(alignment: isFavourite ? .topTrailing : .topLeading) {
+            FlawTip(flaws: flaws)
         }
         .overlay(alignment: .bottomTrailing) {
             if !isFavourite {

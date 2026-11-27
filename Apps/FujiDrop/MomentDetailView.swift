@@ -15,12 +15,16 @@ struct MomentDetailView: View {
         let picked = model.picked(in: ids)
         let suggested = picked == nil ? model.suggested(in: ids) : nil
         let ranking = showDetails ? model.ranking(of: ids) : nil
+        let flaws = model.flaws(in: ids)
         ScrollView {
             LazyVStack(spacing: 3) {
                 ForEach(ids, id: \.self) { id in
                     PreviewImage(shot: model.shots[id])
                         .aspectRatio(model.aspect(id, clamped: false), contentMode: .fit)
                         .frame(maxWidth: .infinity)
+                        .overlay(alignment: .topLeading) {
+                            FlawTip(flaws: flaws[id] ?? [])
+                        }
                         .overlay(alignment: .topTrailing) {
                             if id == picked { PickedBadge() } else if id == suggested { SuggestedBadge() }
                         }
@@ -82,6 +86,7 @@ struct MomentDetailView: View {
         var parts = ["focus \(pct(r.sharpness))"]
         if let face = r.face { parts.append("face \(pct(face))") }
         if let aesthetics = r.aesthetics { parts.append("look \(pct(aesthetics))") }
+        if let eyes = r.eyeOpenness { parts.append("eyes \(pct(eyes))") }
         parts.append("= \(pct(r.total))")
         return parts.joined(separator: " · ")
     }
