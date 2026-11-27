@@ -1,13 +1,18 @@
-# HDR bracket merge: plan
+# LibRaw DNG pipeline and HDR merge: plan
 
-Merge exposure-bracketed landscape shots into one floating-point linear DNG. The decode uses
+Save shots as linear DNGs and merge exposure-bracketed landscape shots into one floating-point
+linear DNG. The decode uses
 LibRaw's Markesteijn demosaic instead of Apple's RAW engine, because X-Trans renders badly in
 many editors. Written Nov 27, 2026 for a session on the local Mac, which has the X-T1, the
 iPhone, Xcode and a desktop editor. Read `docs/HANDOFF.md` first for how the app works.
 
 ## Decisions already made
 
-- **Scope:** DNG output is for HDR merges only. Ordinary saves stay RAF + JPEG, as built.
+- **Scope:** DNG output for HDR merges, plus an optional "save as DNG" format for ordinary
+  saves, since the study showed LibRaw beating Apple's decoding in general. RAF + JPEG stays the
+  default until DNG saves are checked on the device.
+- **Order:** decoder → DNG writer → DNG for single saves → bracket detection → merge → HDR in
+  the app. Single-frame saves test the decoder and writer before the merge adds its own bugs.
 - **Decoder:** LibRaw 0.22.2, **1-pass** Markesteijn (`user_qual = 2`), followed by our own
   false-colour cleanup. 3-pass isn't worth it: on average it differs from 1-pass by under one
   level in 255, and it takes twice as long.
@@ -94,7 +99,86 @@ Copy one bracket's RAFs to the Mac as test fixtures. Keep them out of git: they'
     In CI, download a raw.pixls.us X-T1 sample in a workflow step and set the variable.
   - On the iPhone, time one X-T1 decode in a Release build. The target is about 2 s or less.
 
-## Step 2: bracket detection
+## Step 2: DNG writer
+
+Write our own minimal TIFF/DNG writer (`Library/DNGWriter.swift`), since iOS can read DNG but
+not write it. HDRMerge's `DngFloatWriter` is a good reference (read it, don't copy it: GPL).
+It supports two sample formats: **16-bit integer**, for single saves (step 3, built first), and
+**half float**, for HDR merges (needed by step 6). Both share everything else below.
+
+- **Layout:**
+  - IFD0 holds a 1024 px 8-bit sRGB preview, `NewSubfileType = 1`.
+  - A SubIFD holds the main image, `NewSubfileType = 0`.
+  - An EXIF IFD carries the date, exposure and lens, copied from the source frame (the reference
+    frame for merges).
+- **Main image:**
+  - `PhotometricInterpretation = 34892` (LinearRaw), `SamplesPerPixel = 3`.
+  - Single saves: `SampleFormat = 1`, `BitsPerSample = 16`, `WhiteLevel = 65535`,
+    `Compression = 8` (Deflate) with `Predictor = 2` (horizontal differencing).
+  - Merges: `SampleFormat = 3`, `BitsPerSample = 16` (half float, as HDRMerge uses), Deflate with
+    `Predictor = 34894` (floating point, x2).
+  - Tiles of 256×256. Start uncompressed and add compression once the file validates.
+- **Required tags:**
+  - `DNGVersion 1.4.0.0`. `DNGBackwardVersion` is 1.4.0.0 for float data, 1.1.0.0 is enough for
+    16-bit integer.
+  - `UniqueCameraModel "Fujifilm X-T1"`, `Make`, `Model`, `Orientation`.
+  - `ColorMatrix1` = LibRaw `cam_xyz` (3×3, rows normalized as LibRaw has them), with
+    `CalibrationIlluminant1 = 21` (D65; LibRaw's Adobe matrices are D65).
+  - `AsShotNeutral` = 1 / camMul, normalized to green = 1.
+  - Float data ignores `WhiteLevel` / `BlackLevel`: scale merged values so the brightest value is
+    1.0. Integer data has black at 0 (already subtracted by LibRaw) and white at 65535.
+  - Set `BaselineExposure` so the frame's mid-tones render as they did at capture (for merges, the
+    reference frame's), plus the DR offset. Use the existing `Brightness.stops` against the reference frame's
+    embedded JPEG; that's the same logic `RAWRenderer.matchExposure` uses for DR200/DR400.
+  - `DefaultCropOrigin` / `DefaultCropSize`: LibRaw's visible area, or the area all frames cover
+    after alignment.
+- **Validate on the Mac** before involving Photos:
+  - Adobe's `dng_validate` from the DNG SDK should pass with no warnings.
+  - The file should open in Lightroom (or Capture One) and in macOS Preview / Photos, with
+    sensible colour and white balance. Moving the temperature slider should behave like a RAW.
+  - For merges (once step 5 exists): highlight recovery should reach the detail from the darkest
+    frame.
+
+## Step 3: DNG for every save (optional format)
+
+This comes before the merge because it runs the decoder and the writer end to end on single
+frames, with no merge logic to debug alongside them.
+
+- **Setting:** in Settings, "Save RAW as: **RAF (original)** / **DNG (sharper detail)**". It
+  defaults to RAF until the owner has compared DNG saves on the phone and in a desktop editor.
+- **Pipeline for each save** (in `SaveQueue.save(_:)`, on `Background.raw`):
+  1. Decode the RAF with `XTransDecoder`.
+  2. Apply the colour cleanup from step 5's list (`clean()`). Move it into its own file now so
+     the merge can reuse it.
+  3. Write the DNG. Single frames don't need float: write **16-bit integer** linear data
+     (`SampleFormat = 1`, `WhiteLevel = 65535`), Deflate-compressed, to keep files near 45–55 MB.
+  4. Render the **pairing JPEG from the same decoded data**, not from Apple's RAW filter.
+     Otherwise the photo people see and share keeps Apple's crunchy render.
+     - Convert camera colour to sRGB through `cam_xyz` and the XYZ→sRGB matrix, with the
+       as-shot white balance.
+     - Apply a gentle filmic tone curve, then the brightness match against the embedded JPEG
+       (`Brightness.stops`, as `RAWRenderer.matchExposure` does now).
+     - Tune it so the result sits close to the camera's own JPEG.
+  5. `PhotoSaver.savePair(jpeg:raw:)` with the DNG as `.alternatePhoto` and
+     `originalResourceChoice = .raw`.
+- **Keeping the original:**
+  - A Photos asset holds only one RAW, so the RAF can't ride along in the same asset.
+  - Offer "Also keep RAF files" as an option: copy RAFs to a folder in the app's Documents,
+    visible in Files with `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace`.
+  - Off by default.
+- **Checks:**
+  - Photos shows the pair as RAW+JPEG, and editing in Photos uses the DNG
+    (`PhotoSaver.editingBase`).
+  - Lightroom opens the DNG as raw. Check that Fujifilm Camera Matching profiles (Provia,
+    Classic Chrome…) are still offered, and that lens corrections still apply. If the profiles
+    disappear, note it in Settings next to the option.
+  - At 100 %, foliage in the DNG looks like the study page's "1-pass + cleanup", not Apple's.
+  - Save time on the iPhone is about 3 s or less per photo in a Release build. The save bar
+    copes, since it already runs in the background.
+- **Saved-state bookkeeping:** `saved.v1` maps a shot key to an asset ID. Also record the format
+  each shot was saved in, so switching the setting later doesn't re-save or confuse anything.
+
+## Step 4: bracket detection
 
 - **Read exposure EXIF for each shot:** ExposureTime, FNumber, ISO and ExposureBiasValue.
   - Use `CGImageSource` on the cached embedded preview, but check first that the preview file
@@ -112,7 +196,7 @@ Copy one bracket's RAFs to the Mac as test fixtures. Keep them out of git: they'
 - **Unit tests:** pure functions over EV lists. Cover AE BKT, manual ±2, a non-bracket burst,
   and a bracket cut in half by the moment grouping.
 
-## Step 3: merge
+## Step 5: merge
 
 Everything happens on linear camera-native floats. For 3 frames at 16 MP that's about 200 MB per
 frame in Float32. Work in horizontal strips of about 256 rows. Each strip can go to its own core
@@ -146,40 +230,7 @@ frame in Float32. Work in horizontal strips of about 256 rows. Each strip can go
    clipped. The merge should reconstruct the original within 1 % and leave no seams at clip
    boundaries.
 
-## Step 4: DNG writer
-
-Write our own minimal TIFF/DNG writer (`Library/DNGWriter.swift`), since iOS can read DNG but
-not write it. HDRMerge's `DngFloatWriter` is a good reference (read it, don't copy it: GPL).
-
-- **Layout:**
-  - IFD0 holds a 1024 px 8-bit sRGB preview, `NewSubfileType = 1`.
-  - A SubIFD holds the main image, `NewSubfileType = 0`.
-  - An EXIF IFD carries the date, exposure and lens copied from the reference frame.
-- **Main image:**
-  - `PhotometricInterpretation = 34892` (LinearRaw), `SamplesPerPixel = 3`.
-  - `SampleFormat = 3`, `BitsPerSample = 16` (half float, as HDRMerge uses).
-  - Tiles of 256×256.
-  - `Compression = 8` (Deflate) with `Predictor = 34894` (floating point, x2). Start
-    uncompressed and add compression once the file validates.
-- **Required tags:**
-  - `DNGVersion 1.4.0.0`, `DNGBackwardVersion 1.4.0.0` (needed for float data).
-  - `UniqueCameraModel "Fujifilm X-T1"`, `Make`, `Model`, `Orientation`.
-  - `ColorMatrix1` = LibRaw `cam_xyz` (3×3, rows normalized as LibRaw has them), with
-    `CalibrationIlluminant1 = 21` (D65; LibRaw's Adobe matrices are D65).
-  - `AsShotNeutral` = 1 / camMul, normalized to green = 1.
-  - `WhiteLevel` / `BlackLevel` are unused for float data. Scale the merged values so the
-    brightest value is 1.0.
-  - Set `BaselineExposure` so the reference frame's mid-tones render as they did at capture,
-    plus the DR offset. Use the existing `Brightness.stops` against the reference frame's
-    embedded JPEG; that's the same logic `RAWRenderer.matchExposure` uses for DR200/DR400.
-  - `DefaultCropOrigin` / `DefaultCropSize` after alignment.
-- **Validate on the Mac** before involving Photos:
-  - Adobe's `dng_validate` from the DNG SDK should pass with no warnings.
-  - The file should open in Lightroom (or Capture One) and in macOS Preview / Photos, with
-    sensible colour and white balance. Moving the temperature slider should behave like a RAW.
-  - Highlight recovery should reach the detail from the darkest frame.
-
-## Step 5: app integration
+## Step 6: HDR in the app
 
 - **Merge button:** the moment viewer shows **Merge** for brackets. Merging runs on
   `Background.raw`:
@@ -204,9 +255,8 @@ not write it. HDRMerge's `DngFloatWriter` is a good reference (read it, don't co
 
 ## Follow-ups (not in this plan)
 
-- Use the LibRaw path for *every* save's JPEG, which would fix the crunchy default render. It
-  could also optionally save the converted DNG instead of the RAF for all saves, which was
-  considered earlier and deferred.
+- Use the LibRaw-rendered JPEG for RAF saves too (step 3 builds it), which would fix the crunchy
+  default render for people who keep the RAF format.
 - Merge on the raw mosaic before demosaicing: one demosaic instead of three, and cleaner. Harder
   for handheld brackets.
 - A Metal version of Markesteijn, if decode time is the bottleneck on the phone.
