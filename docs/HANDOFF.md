@@ -80,7 +80,12 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
    `BestShot.Flaw`), which also cost 25 % of the score each. Eyes closed uses Vision landmark eye
    outline height/width < 0.15 on faces ≥ 6 % of frame width; "eyes" in the details label shows
    the value for calibration.
-   Still to do: for close calls, download the 2 RAFs (~1.4 s each) for true 100 % crops.
+   **Full resolution** (built Nov 27, 2026, not yet checked on device): opening compare downloads
+   both shown frames' RAFs (`ImportModel.rawURL`, kept in `RawCache`, last 6, cleared on
+   disconnect) and decodes them with `RAWRenderer.renderImage` on a serial queue; each pane
+   swaps the preview for the full image with the same viewport and shows a "RAW" badge.
+   The preview queue pauses while a RAF downloads. Compare allows 8× zoom (100 % ≈ 4.2×
+   stacked, ≈ 5.5× side by side). Saving a pick should reuse `rawURL` (cached after compare).
 3. Save picks: `RAWRenderer` full-size JPEG + RAF via `PhotoSaver` (RAW as editing base), with
    location borrowed from nearby iPhone photos (camera clock can't be synced, so estimate offset).
 4. Share: hand off to Instagram via the share sheet.

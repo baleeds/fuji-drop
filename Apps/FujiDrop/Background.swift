@@ -12,6 +12,15 @@ enum Background {
     /// Best-shot scoring: lowest priority, so it never holds up feature prints (grouping).
     private static let scoreQueue = DispatchQueue(label: "FujiDrop.score", qos: .background)
 
+    /// Full-resolution RAW decodes: one at a time (each needs a few hundred MB while it runs).
+    private static let rawQueue = DispatchQueue(label: "FujiDrop.raw", qos: .userInitiated)
+
+    static func raw<T>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { cont in
+            rawQueue.async { cont.resume(returning: work()) }
+        }
+    }
+
     static func decode<T>(_ work: @escaping @Sendable () -> T) async -> T {
         await withCheckedContinuation { cont in
             decodeQueue.async { cont.resume(returning: work()) }

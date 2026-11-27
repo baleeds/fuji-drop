@@ -37,9 +37,12 @@ final class ZoomGroup {
 struct ZoomableImage: UIViewRepresentable {
     let image: UIImage
     var group: ZoomGroup?
+    /// Maximum zoom over fit. Panes in one group should share it so they stay in step.
+    var maxZoom: CGFloat = 4
 
     func makeUIView(context: Context) -> ZoomingScrollView {
         let view = ZoomingScrollView(image: image)
+        view.maximumZoomScale = maxZoom
         view.group = group
         group?.register(view)
         return view

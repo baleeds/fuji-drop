@@ -31,9 +31,9 @@ struct CompareView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 layout {
-                    ComparePane(shot: model.shots[favourite], flaws: flaws[favourite] ?? [], group: group,
+                    ComparePane(model: model, shot: model.shots[favourite], flaws: flaws[favourite] ?? [], group: group,
                                 isFavourite: true, promote: {})
-                    ComparePane(shot: model.shots[challenger], flaws: flaws[challenger] ?? [], group: group,
+                    ComparePane(model: model, shot: model.shots[challenger], flaws: flaws[challenger] ?? [], group: group,
                                 isFavourite: false) {
                         let previous = favourite
                         favourite = challenger
@@ -69,20 +69,64 @@ struct CompareView: View {
     }
 }
 
-/// One side of the comparison: the frame's 1920 px preview, zoomable with the other side.
+/// Full-resolution decodes of downloaded RAFs. Only a couple are kept: each is ~64 MB.
+@MainActor
+final class FullResolutionLoader {
+    static let shared = FullResolutionLoader()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private var running: [URL: Task<UIImage?, Never>] = [:]
+
+    private init() {
+        cache.totalCostLimit = 200_000_000
+    }
+
+    /// An already decoded image, without waiting.
+    func cached(_ url: URL) -> UIImage? {
+        cache.object(forKey: url.lastPathComponent as NSString)
+    }
+
+    func image(for url: URL) async -> UIImage? {
+        let key = url.lastPathComponent as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        if let task = running[url] { return await task.value }
+        let task = Task { () -> UIImage? in
+            await Background.raw {
+                (try? RAWRenderer.renderImage(from: url)).map { UIImage(cgImage: $0) }
+            }
+        }
+        running[url] = task
+        let image = await task.value
+        running[url] = nil
+        if let image {
+            cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4))
+        }
+        return image
+    }
+}
+
+/// One side of the comparison, zoomable with the other side: the 1920 px preview at once,
+/// then the full-resolution RAF once it has downloaded and decoded (a few seconds).
 private struct ComparePane: View {
+    let model: ImportModel
     let shot: ImportModel.Shot?
     let flaws: [BestShot.Flaw]
     let group: ZoomGroup
     let isFavourite: Bool
     let promote: () -> Void
     @State private var image: UIImage?
+    @State private var full: FullState = .loading
+
+    private enum FullState { case loading, ready, failed }
+
+    /// Up to 8× in compare: enough for 100 % of a 4896 px RAF in a half-width pane.
+    private static let maxZoom: CGFloat = 8
 
     var body: some View {
         ZStack {
             Color.black
             if let image {
-                ZoomableImage(image: image, group: group)
+                ZoomableImage(image: image, group: group, maxZoom: Self.maxZoom)
             } else if let thumbnail = shot?.thumbnail {
                 Image(uiImage: thumbnail).resizable().scaledToFit()
             }
@@ -112,12 +156,67 @@ private struct ComparePane: View {
                 .padding(10)
             }
         }
-        .task(id: shot?.previewURL) {
+        .overlay(alignment: .bottomLeading) { rawBadge }
+        .task(id: TaskKey(id: shot?.id, preview: shot?.previewURL)) {
             // Keep showing the previous frame until the new one decodes (usually from the
             // in-memory cache), so the zoomable view and its viewport carry over.
-            guard let url = shot?.previewURL else { image = nil; return }
-            image = await PreviewImageLoader.shared.load(url: url, maxPixelSize: 1920)
+            guard let shot else { image = nil; return }
+            // Already decoded (e.g. after swapping panes): show it straight away.
+            if let raw = model.cachedRawURL(shot.id), let decoded = FullResolutionLoader.shared.cached(raw) {
+                image = decoded
+                full = .ready
+                return
+            }
+            full = .loading
+            if let url = shot.previewURL {
+                let preview = await PreviewImageLoader.shared.load(url: url, maxPixelSize: 1920)
+                guard !Task.isCancelled else { return }
+                image = preview
+            }
+            // Then the real pixels. The download continues if this pane moves on to another
+            // frame, so switching back is instant.
+            guard let raw = await model.rawURL(shot.id), !Task.isCancelled else {
+                if !Task.isCancelled { full = .failed }
+                return
+            }
+            let fullImage = await FullResolutionLoader.shared.image(for: raw)
+            guard !Task.isCancelled else { return }
+            if let fullImage {
+                image = fullImage
+                full = .ready
+            } else {
+                full = .failed
+            }
         }
+    }
+
+    private struct TaskKey: Equatable {
+        let id: String?
+        let preview: URL?
+    }
+
+    /// Small status: loading RAW, RAW (full resolution), or RAW unavailable.
+    @ViewBuilder private var rawBadge: some View {
+        Group {
+            switch full {
+            case .loading:
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini).tint(.white)
+                    Text("RAW")
+                }
+            case .ready:
+                Text("RAW")
+            case .failed:
+                Label("RAW", systemImage: "exclamationmark.triangle.fill")
+            }
+        }
+        .font(.caption2.weight(.bold))
+        .foregroundStyle(full == .ready ? .white : .white.opacity(0.7))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(.black.opacity(0.5), in: Capsule())
+        .padding(10)
+        .accessibilityLabel(full == .ready ? "Full resolution" : full == .loading ? "Loading full resolution" : "Full resolution unavailable")
     }
 }
 

@@ -41,6 +41,12 @@ final class ImportModel: ObservableObject {
 
     let camera = CameraSession()
     private let cache = PreviewCache()
+    private let rawCache = RawCache()
+    /// In-flight RAF downloads by shot id, so two callers share one download.
+    private var rawDownloads: [String: Task<URL?, Never>] = [:]
+    /// While above zero, the preview queue waits: the camera answers one request at a time and
+    /// a RAF someone is looking at matters more than background previews.
+    private var activeRawDownloads = 0
 
     @Published private(set) var days: [Day] = []
     @Published private(set) var selectedDayID: String?
@@ -69,6 +75,7 @@ final class ImportModel: ObservableObject {
 
     init() {
         pruneCache()
+        rawCache.clear() // left over from a previous session
     }
 
     // MARK: Catalog → days
@@ -99,6 +106,9 @@ final class ImportModel: ObservableObject {
         worker?.cancel()
         worker = nil
         workerGeneration += 1
+        rawDownloads.values.forEach { $0.cancel() }
+        rawDownloads = [:]
+        rawCache.clear()
         queue = []
         days = []; selectedDayID = nil; shots = [:]; order = []; moments = []
         previewStart = nil; distanceCache = [:]
@@ -172,6 +182,9 @@ final class ImportModel: ObservableObject {
         worker = Task { [weak self] in
             var loaded = 0
             while let self, !Task.isCancelled, let id = self.nextQueued() {
+                while self.activeRawDownloads > 0, !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
                 let started = Date()
                 await self.loadPreview(id)
                 loaded += 1
@@ -271,6 +284,43 @@ final class ImportModel: ObservableObject {
     private func finishPrint(_ id: String, _ print: FeaturePrint?) {
         shots[id]?.print = print
         if order.contains(id) { regroup() }
+    }
+
+    // MARK: Full RAF
+
+    /// The shot's RAF if it's already downloaded.
+    func cachedRawURL(_ id: String) -> URL? {
+        guard let shot = shots[id] else { return nil }
+        return rawCache.cachedURL(name: id, size: Int64(shot.raw.fileSize))
+    }
+
+    /// Downloads a shot's RAF (about 1.4 s for 33 MB), or returns the cached copy.
+    func rawURL(_ id: String) async -> URL? {
+        guard let shot = shots[id] else { return nil }
+        let size = Int64(shot.raw.fileSize)
+        if let cached = rawCache.cachedURL(name: id, size: size) { return cached }
+        if let running = rawDownloads[id] { return await running.value }
+        let task = Task { [weak self] () -> URL? in
+            guard let self else { return nil }
+            self.activeRawDownloads += 1
+            defer { self.activeRawDownloads -= 1 }
+            let started = Date()
+            do {
+                let downloaded = try await self.camera.download(shot.raw, to: self.rawCache.incoming)
+                let url = try self.rawCache.adopt(downloaded, name: id, size: size)
+                self.rawCache.prune()
+                self.camera.record(String(format: "RAF %@: %.1f MB in %.2f s", id,
+                                          Double(size) / 1_000_000, Date().timeIntervalSince(started)))
+                return url
+            } catch {
+                self.camera.record("RAF \(id) failed: \(error.localizedDescription)")
+                return nil
+            }
+        }
+        rawDownloads[id] = task
+        let url = await task.value
+        rawDownloads[id] = nil
+        return url
     }
 
     // MARK: Preview cache

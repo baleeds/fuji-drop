@@ -24,10 +24,9 @@ public enum RAWRenderer {
     /// Shared context; creating one per image is expensive.
     nonisolated(unsafe) static let context = CIContext(options: [.cacheIntermediates: false])
 
-    /// Writes `<basename>.JPG` next to `raw` (or into `directory`) and returns its URL.
-    /// Uses Apple's default RAW rendering with the RAF's own EXIF (capture date, camera, lens).
-    @discardableResult
-    public static func renderJPEG(from raw: URL, into directory: URL? = nil, quality: Double = 0.92) throws -> URL {
+    /// Decodes a RAF at full resolution (upright, sRGB) with Apple's default RAW rendering.
+    /// About 1.3 s and ~64 MB per X-T1 frame: call it off the main thread.
+    public static func renderImage(from raw: URL) throws -> CGImage {
         let name = raw.lastPathComponent
         guard let filter = CIRAWFilter(imageURL: raw), let image = filter.outputImage else {
             throw RenderError.cannotDecode(name)
@@ -37,6 +36,14 @@ public enum RAWRenderer {
         guard let cg = context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: sRGB) else {
             throw RenderError.cannotRender(name)
         }
+        return cg
+    }
+
+    /// Writes `<basename>.JPG` next to `raw` (or into `directory`) and returns its URL.
+    /// Uses Apple's default RAW rendering with the RAF's own EXIF (capture date, camera, lens).
+    @discardableResult
+    public static func renderJPEG(from raw: URL, into directory: URL? = nil, quality: Double = 0.92) throws -> URL {
+        let cg = try renderImage(from: raw)
 
         var props: [CFString: Any] = [:]
         if let src = CGImageSourceCreateWithURL(raw as CFURL, nil),
