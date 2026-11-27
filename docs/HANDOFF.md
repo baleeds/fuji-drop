@@ -64,9 +64,13 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
 
 ## Next steps after the bug
 
-1. Best-shot scoring per moment on the 1920×1280 previews: Laplacian sharpness on the subject
-   (MPS or vImage), `VNDetectFaceCaptureQualityRequest`, `CalculateImageAestheticsScoresRequest`.
-   Use the top score as each moment's hero image instead of the middle frame.
+1. ~~Best-shot scoring~~ (built Nov 27, 2026, **not yet checked on device**): `ShotScorer` measures
+   focus (Laplacian variance, sharpest quarter of 64 px tiles on the faces or salient subject),
+   face capture quality and aesthetics on each 1920 px preview; `BestShot` ranks within a moment
+   (focus 55 %, aesthetics 25 %, faces 20 % when any frame has one). The feed's hero is the
+   suggested pick once all frames are scored; the detail view stars it. Turn on "Show grouping
+   details" to see each part of the score, and calibrate the weights on real bursts. Scores
+   aren't cached on disk yet (recomputed each connect, ~0.1–0.3 s per shot expected).
 2. Compare screen: synced zoom across candidates; for close calls, download the top 2–3 RAFs
    (~1.4 s each) and compare true 100% crops.
 3. Save picks: `RAWRenderer` full-size JPEG + RAF via `PhotoSaver` (RAW as editing base), with
