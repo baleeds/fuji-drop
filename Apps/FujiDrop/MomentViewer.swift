@@ -6,7 +6,7 @@ import UIKit
 /// moment's frames below. Swipe (at fit zoom) or tap the filmstrip to move between frames;
 /// tap a frame's circle to select it (selecting saves it to Photos).
 ///
-/// Compare splits the view into two panes with zoom and pan locked together, loading the
+/// Compare stacks two panes with zoom and pan locked together, loading the
 /// full-resolution RAW of both: the frame you were on, and the best-ranked other frame. The
 /// filmstrip marks which pane each frame is in and picks the second pane; Swap exchanges
 /// them. Single-frame moments have no
@@ -34,9 +34,9 @@ struct MomentViewer: View {
         let other = challenger.flatMap { ids.contains($0) && $0 != shown ? $0 : nil }
         VStack(spacing: 0) {
             if let other {
-                let sideBySide = model.aspect(shown, clamped: false) < 1
-                let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 2)) : AnyLayout(VStackLayout(spacing: 2))
-                layout {
+                // Always stacked: on a phone, half the height at full width is larger than
+                // half the width even for portrait frames, and much larger once zoomed in.
+                VStack(spacing: 2) {
                     pane(shown, ranking: ranking, comparing: true)
                     pane(other, ranking: ranking, comparing: true) {
                         current = other
@@ -48,8 +48,7 @@ struct MomentViewer: View {
             }
             if ids.count > 1 {
                 Filmstrip(model: model, ids: ids, current: shown, challenger: other,
-                          suggested: ranking?.suggested,
-                          sideBySide: model.aspect(shown, clamped: false) < 1) { id in
+                          suggested: ranking?.suggested) { id in
                     if other != nil {
                         if id != shown { challenger = id }
                     } else {
@@ -148,10 +147,11 @@ private struct ViewerPane: View {
     /// nothing more to show past 4×.
     private var maxZoom: CGFloat { loadsRAW ? 8 : 4 }
 
-    /// Width / height of the photo (portrait frames are taller than wide).
-    private var aspect: CGFloat {
-        guard let size = image?.size ?? shot?.thumbnail?.size, size.height > 0 else { return 1.5 }
-        return size.width / size.height
+    /// The photo's size at fit zoom within `space`.
+    private func fittedSize(in space: CGSize) -> CGSize {
+        guard let size = image?.size ?? shot?.thumbnail?.size, size.width > 0, size.height > 0 else { return space }
+        let scale = min(space.width / size.width, space.height / size.height)
+        return CGSize(width: size.width * scale, height: size.height * scale)
     }
 
     private var photo: some View {
@@ -167,38 +167,43 @@ private struct ViewerPane: View {
     }
 
     var body: some View {
-        // The pane is sized to the photo's shape and centred, so every mark sits on the
-        // photo's own corners rather than the edges of the (often much taller) space.
-        ZStack {
-            Color.black
-            photo
-                .aspectRatio(aspect, contentMode: .fit)
-                .overlay(alignment: .topLeading) {
-                    if let shot {
-                        SelectionCircle(state: model.selectionState(shot.id)) { model.toggleSelection(shot.id) }
-                    }
-                }
-                .overlay(alignment: .topTrailing) {
-                    if isSuggested { SuggestedBadge() }
-                }
-                .overlay(alignment: .bottomLeading) {
-                    VStack(alignment: .leading, spacing: -14) {
-                        FlawTip(flaws: flaws)
-                        if let details { PhotoLabel(title: details) }
-                        if loadsRAW { rawBadge }
-                    }
-                }
-                .overlay(alignment: .bottomTrailing) {
-                    if let swap {
-                        Button(action: swap) {
-                            Label("Swap", systemImage: "arrow.up.arrow.down")
-                                .font(.footnote.weight(.semibold))
+        // The zoomable photo fills the whole pane (so zooming in uses all of it), while the
+        // marks sit on the corners of where the photo is drawn at fit zoom, not at the edges
+        // of the pane. The mark layer only takes touches on its controls.
+        GeometryReader { geo in
+            let fitted = fittedSize(in: geo.size)
+            ZStack {
+                photo
+                Color.clear
+                    .frame(width: fitted.width, height: fitted.height)
+                    .overlay(alignment: .topLeading) {
+                        if let shot {
+                            SelectionCircle(state: model.selectionState(shot.id)) { model.toggleSelection(shot.id) }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .padding(8)
                     }
-                }
+                    .overlay(alignment: .topTrailing) {
+                        if isSuggested { SuggestedBadge() }
+                    }
+                    .overlay(alignment: .bottomLeading) {
+                        VStack(alignment: .leading, spacing: -14) {
+                            FlawTip(flaws: flaws)
+                            if let details { PhotoLabel(title: details) }
+                            if loadsRAW { rawBadge }
+                        }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if let swap {
+                            Button(action: swap) {
+                                Label("Swap", systemImage: "arrow.up.arrow.down")
+                                    .font(.footnote.weight(.semibold))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .padding(8)
+                        }
+                    }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
         .task(id: TaskKey(id: shot?.id, preview: shot?.previewURL, loadsRAW: loadsRAW)) {
             // Keep showing the previous frame until the new one decodes (usually from the
@@ -266,20 +271,18 @@ private struct ViewerPane: View {
     }
 }
 
-/// Which compare pane a filmstrip frame is in: a miniature of the two-pane layout (stacked,
-/// or side by side for portrait frames) with this frame's pane filled.
+/// Which compare pane a filmstrip frame is in: a miniature of the stacked two-pane layout
+/// with this frame's pane filled.
 private struct PaneMarker: View {
-    /// 0 = first pane (top / left), 1 = second (bottom / right).
+    /// 0 = top pane, 1 = bottom.
     let pane: Int
-    let sideBySide: Bool
 
     var body: some View {
-        let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 1.5)) : AnyLayout(VStackLayout(spacing: 1.5))
-        layout {
+        VStack(spacing: 1.5) {
             ForEach(0..<2) { i in
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(i == pane ? Color.white : Color.white.opacity(0.25))
-                    .frame(width: sideBySide ? 7 : 14, height: sideBySide ? 10 : 5)
+                    .frame(width: 14, height: 5)
             }
         }
         .accessibilityHidden(true)
@@ -295,7 +298,6 @@ private struct Filmstrip: View {
     let current: String
     let challenger: String?
     let suggested: String?
-    let sideBySide: Bool
     let select: (String) -> Void
 
     var body: some View {
@@ -331,9 +333,9 @@ private struct Filmstrip: View {
     @ViewBuilder private func marker(_ id: String) -> some View {
         if challenger != nil {
             if id == current {
-                PaneMarker(pane: 0, sideBySide: sideBySide)
+                PaneMarker(pane: 0)
             } else if id == challenger {
-                PaneMarker(pane: 1, sideBySide: sideBySide)
+                PaneMarker(pane: 1)
             }
         } else if id == current {
             Capsule().fill(.white).frame(width: 18, height: 3)
@@ -342,9 +344,8 @@ private struct Filmstrip: View {
 
     private func accessibilityLabel(_ id: String) -> String {
         var parts = ["Frame \((ids.firstIndex(of: id) ?? 0) + 1)"]
-        let first = sideBySide ? "left pane" : "top pane", second = sideBySide ? "right pane" : "bottom pane"
-        if challenger != nil, id == current { parts.append(first) }
-        if id == challenger { parts.append(second) }
+        if challenger != nil, id == current { parts.append("top pane") }
+        if id == challenger { parts.append("bottom pane") }
         if challenger == nil, id == current { parts.append("shown") }
         if id == suggested { parts.append("suggested") }
         if model.isSelected(id) { parts.append("selected") }
