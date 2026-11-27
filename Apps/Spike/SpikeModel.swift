@@ -198,27 +198,44 @@ final class SpikeModel: ObservableObject {
         camera.shots.first { $0.basename == selected }
     }
 
+    /// Saves the selected shot as a RAW+JPEG asset. Uses the in-camera JPEG when there is one;
+    /// for RAW-only shots it renders a full-resolution JPEG from the RAF on the phone.
     func testSavePair() async {
-        guard let shot = selectedShot ?? camera.shots.last(where: \.isComplete) else {
+        guard let shot = selectedShot ?? camera.shots.last(where: { $0.raw != nil }) else {
             return set(3, .fail, "No shot selected.")
         }
-        guard let jpegFile = shot.jpeg, let rawFile = shot.raw else {
-            return set(3, .fail, "\(shot.basename) is not a RAF+JPEG pair. Shoot one in FINE+RAW and select it.")
+        guard let rawFile = shot.raw else {
+            return set(3, .fail, "\(shot.basename) has no RAF. Select a RAW shot.")
         }
         busy = true; defer { busy = false }
-        set(3, .running, "Downloading \(shot.basename) JPG + RAF…")
+        set(3, .running, "Downloading \(shot.basename).RAF…")
         do {
             let dir = workDir.appendingPathComponent(shot.basename)
             let t0 = Date()
-            let jpeg = try await camera.download(jpegFile, to: dir)
-            let t1 = Date()
             let raw = try await camera.download(rawFile, to: dir)
-            let t2 = Date()
+            let rawSecs = Date().timeIntervalSince(t0)
             let rawMB = Double((try? raw.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) / 1e6
-            let timing = String(format: "JPG %.2f s, RAF %.1f MB in %.2f s (%.1f MB/s)",
-                                t1.timeIntervalSince(t0), rawMB, t2.timeIntervalSince(t1),
-                                rawMB / max(t2.timeIntervalSince(t1), 0.001))
-            camera.record("Downloaded pair: \(timing)")
+            var timing = String(format: "RAF %.1f MB in %.2f s (%.1f MB/s)", rawMB, rawSecs, rawMB / max(rawSecs, 0.001))
+
+            let jpeg: URL
+            if let jpegFile = shot.jpeg {
+                let t1 = Date()
+                jpeg = try await camera.download(jpegFile, to: dir)
+                timing += String(format: ", in-camera JPG %.2f s", Date().timeIntervalSince(t1))
+            } else {
+                set(3, .running, "Rendering full-size JPEG from \(shot.basename).RAF…")
+                let t1 = Date()
+                let renderDir = dir.appendingPathComponent("rendered")
+                try FileManager.default.createDirectory(at: renderDir, withIntermediateDirectories: true)
+                jpeg = try await Task.detached(priority: .userInitiated) {
+                    try RAWRenderer.renderJPEG(from: raw, into: renderDir)
+                }.value
+                let (_, size) = Self.decode(try Data(contentsOf: jpeg))
+                let jpegMB = Double((try? jpeg.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) / 1e6
+                timing += String(format: ", rendered JPG %d×%d %.1f MB in %.2f s",
+                                 Int(size.width), Int(size.height), jpegMB, Date().timeIntervalSince(t1))
+            }
+            camera.record("Prepared \(shot.basename): \(timing)")
 
             set(3, .running, "Saving to Photos…")
             let id = try await PhotoSaver.savePair(jpeg: jpeg, raw: raw)
@@ -226,7 +243,7 @@ final class SpikeModel: ObservableObject {
             let listing = resources.map(\.description).joined(separator: "; ")
             let paired = resources.contains { $0.type == .photo } && resources.contains { $0.type == .alternatePhoto }
             set(3, paired ? .pass : .fail,
-                "\(timing). Asset resources: \(listing.isEmpty ? "none found" : listing). Check Photos shows a single item labelled RAW+JPEG.")
+                "\(timing). Asset resources: \(listing.isEmpty ? "none found" : listing). Check Photos shows a single RAW+JPEG item with the right date and colors.")
         } catch {
             set(3, .fail, "Failed: \(error.localizedDescription)")
         }

@@ -131,14 +131,14 @@ private struct SpikeContent: View {
 
     private var saveSection: some View {
         Section {
-            Button("Download \(model.selectedShot?.basename ?? "latest pair") and save to Photos") {
+            Button("Save \(model.selectedShot?.basename ?? "latest RAW shot") to Photos as RAW+JPEG") {
                 Task { await model.testSavePair() }
             }
             .disabled(!camera.catalogComplete)
         } header: {
             Text("3. RAW+JPEG to Photos")
         } footer: {
-            Text("Needs a shot taken in FINE+RAW. Afterwards, open Photos and check it shows one item with a RAW+JPEG badge.")
+            Text("Uses the in-camera JPEG if there is one; otherwise renders a full-size JPEG from the RAF on the phone. Afterwards, check Photos shows one RAW+JPEG item with the right date and colors.")
         }
     }
 
