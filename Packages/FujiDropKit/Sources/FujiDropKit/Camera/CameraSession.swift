@@ -55,25 +55,21 @@ public final class CameraSession: NSObject, ObservableObject {
         refreshAuthorizationStatus()
         record("Contents authorization before request: \(contentsAuthorization)")
 
-        let contents = await withCheckedContinuation { cont in
-            browser.requestContentsAuthorization { cont.resume(returning: $0) }
-        }
-        contentsAuthorization = contents.rawValue
-        record("Contents authorization: \(contents.rawValue)")
+        let contents = await authorization { self.browser.requestContentsAuthorization(completion: $0) }
+        contentsAuthorization = contents
+        record("Contents authorization: \(contents)")
 
-        let control = await withCheckedContinuation { cont in
-            browser.requestControlAuthorization { cont.resume(returning: $0) }
-        }
-        controlAuthorization = control.rawValue
-        record("Control authorization: \(control.rawValue)")
+        let control = await authorization { self.browser.requestControlAuthorization(completion: $0) }
+        controlAuthorization = control
+        record("Control authorization: \(control)")
 
-        guard contents == .authorized else {
-            phase = .failed("Camera access not authorized (\(contents.rawValue)). Check Settings › Privacy.")
+        guard contents == ICAuthorizationStatus.authorized.rawValue else {
+            phase = .failed("Camera access not authorized (\(contents)). Check Settings › Privacy.")
             return
         }
         phase = .searching
         browser.start()
-        record("Browsing for cameras. Connect the X-T1 (USB mode: card reader / PTP) and turn it on.")
+        record("Browsing for cameras. Connect the X-T1 (USB mode: MTP(PTP)) and turn it on.")
     }
 
     public func stop() {
@@ -97,15 +93,26 @@ public final class CameraSession: NSObject, ObservableObject {
 
     /// Clears the stored control-authorization decision, then asks again.
     public func resetControlAuthorization() async {
-        let reset = await withCheckedContinuation { cont in
-            browser.resetControlAuthorization { cont.resume(returning: $0) }
+        let reset = await authorization { self.browser.resetControlAuthorization(completion: $0) }
+        record("Control authorization after reset: \(reset)")
+        let requested = await authorization { self.browser.requestControlAuthorization(completion: $0) }
+        controlAuthorization = requested
+        record("Control authorization after re-request: \(requested)")
+    }
+
+    /// Awaits an ImageCaptureCore authorization callback. Those callbacks have been seen firing
+    /// more than once (reset reported NotDetermined twice), so only the first one counts.
+    /// The long timeout leaves time to answer a system prompt.
+    private func authorization(
+        _ call: (@escaping @Sendable (ICAuthorizationStatus) -> Void) -> Void
+    ) async -> String {
+        do {
+            return try await Self.withTimeout(300, "authorization request") { done in
+                call { done(.success($0.rawValue)) }
+            }
+        } catch {
+            return error.localizedDescription
         }
-        record("Control authorization after reset: \(reset.rawValue)")
-        let requested = await withCheckedContinuation { cont in
-            browser.requestControlAuthorization { cont.resume(returning: $0) }
-        }
-        controlAuthorization = requested.rawValue
-        record("Control authorization after re-request: \(requested.rawValue)")
     }
 
     // MARK: File operations
@@ -113,21 +120,22 @@ public final class CameraSession: NSObject, ObservableObject {
     /// Thumbnail as the camera/ImageCaptureCore provides it by default (no size option),
     /// which is exactly what the spike needs to measure.
     public func thumbnailData(for file: ICCameraFile) async throws -> Data {
-        try await withCheckedThrowingContinuation { cont in
+        try await Self.withTimeout(30, "thumbnail") { done in
             file.requestThumbnailData(options: [:]) { data, error in
-                if let data { cont.resume(returning: data) }
-                else { cont.resume(throwing: error ?? CameraError.empty("thumbnail")) }
+                if let data { done(.success(data)) }
+                else { done(.failure(error ?? CameraError.empty("thumbnail"))) }
             }
         }
     }
 
     public func metadata(for file: ICCameraFile) async throws -> [AnyHashable: Any] {
-        try await withCheckedThrowingContinuation { cont in
+        let result: SendableBox<[AnyHashable: Any]> = try await Self.withTimeout(30, "metadata") { done in
             file.requestMetadataDictionary(options: [:]) { dict, error in
-                if let dict { cont.resume(returning: dict) }
-                else { cont.resume(throwing: error ?? CameraError.empty("metadata")) }
+                if let dict { done(.success(SendableBox(dict))) }
+                else { done(.failure(error ?? CameraError.empty("metadata"))) }
             }
         }
+        return result.value
     }
 
     /// Downloads a file into `directory`, overwriting any previous copy. Returns the file URL.
@@ -137,10 +145,10 @@ public final class CameraSession: NSObject, ObservableObject {
             .downloadsDirectoryURL: directory,
             .overwrite: true,
         ]
-        let filename: String = try await withCheckedThrowingContinuation { cont in
+        let filename: String = try await Self.withTimeout(300, "download") { done in
             _ = file.requestDownload(options: options) { name, error in
-                if let name { cont.resume(returning: name) }
-                else { cont.resume(throwing: error ?? CameraError.empty("download")) }
+                if let name { done(.success(name)) }
+                else { done(.failure(error ?? CameraError.empty("download"))) }
             }
         }
         return directory.appendingPathComponent(filename)
@@ -305,6 +313,12 @@ public final class CameraSession: NSObject, ObservableObject {
             record("Empty file list. Known iOS issue with some bodies; check camera USB mode and card.")
         }
     }
+}
+
+/// Carries a non-Sendable value (e.g. a metadata dictionary) across the callback boundary.
+struct SendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
 }
 
 /// Resumes a continuation exactly once, from whichever thread gets there first.
