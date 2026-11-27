@@ -56,6 +56,8 @@ final class ImportModel: ObservableObject {
     private var previewStart: (date: Date, alreadyDone: Int)?
     private var queue: [String] = []
     private var worker: Task<Void, Never>?
+    /// Bumped on reset so a cancelled worker finishing late can't clear its successor.
+    private var workerGeneration = 0
     private var distanceCache: [String: Float] = [:]
 
     init() {
@@ -89,6 +91,7 @@ final class ImportModel: ObservableObject {
     func reset() {
         worker?.cancel()
         worker = nil
+        workerGeneration += 1
         queue = []
         days = []; selectedDayID = nil; shots = [:]; order = []; moments = []
         previewStart = nil; distanceCache = [:]
@@ -158,15 +161,22 @@ final class ImportModel: ObservableObject {
         queue = atFront ? wanted + queue : queue + wanted
         guard !queue.isEmpty, worker == nil else { return }
         camera.record("Preview queue: starting with \(queue.count) shots.")
+        let generation = workerGeneration
         worker = Task { [weak self] in
             var loaded = 0
             while let self, !Task.isCancelled, let id = self.nextQueued() {
+                let started = Date()
                 await self.loadPreview(id)
                 loaded += 1
+                if loaded <= 3 || loaded % 25 == 0 {
+                    self.camera.record(String(format: "Preview queue: %@ done in %.2f s (%d so far, %d queued)",
+                                              id, Date().timeIntervalSince(started), loaded, self.queue.count))
+                }
             }
-            self?.camera.record("Preview queue: idle after \(loaded) shots.")
-            self?.worker = nil
-            self?.refreshCacheUsage()
+            guard let self, self.workerGeneration == generation else { return }
+            self.camera.record("Preview queue: idle after \(loaded) shots.")
+            self.worker = nil
+            self.refreshCacheUsage()
         }
     }
 
