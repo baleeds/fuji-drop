@@ -126,3 +126,4 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
    Saved picks are remembered by `Shot.key` (`saved.v1`) and shown with a green check.
    Still to do: location borrowed from nearby iPhone photos (estimate the camera clock offset).
 4. Share: hand off to Instagram via the share sheet.
+5. HDR bracket merge to a linear DNG via LibRaw: see `docs/HDR-PLAN.md`.
