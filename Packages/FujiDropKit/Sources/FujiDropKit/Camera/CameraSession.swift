@@ -87,8 +87,8 @@ public final class CameraSession: NSObject, ObservableObject {
     }
 
     public func refreshAuthorizationStatus() {
-        contentsAuthorization = browser.contentsAuthorizationStatus().rawValue
-        controlAuthorization = browser.controlAuthorizationStatus().rawValue
+        contentsAuthorization = browser.contentsAuthorizationStatus.rawValue
+        controlAuthorization = browser.controlAuthorizationStatus.rawValue
     }
 
     public func record(_ text: String) {
