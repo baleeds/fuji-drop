@@ -1,0 +1,64 @@
+# XcodeGen spec. Generate the Xcode project with:  xcodegen generate
+# FujiDrop.xcodeproj is not committed; this file is the source of truth.
+name: FujiDrop
+options:
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_PREVIEWS: YES
+    GENERATE_INFOPLIST_FILE: YES
+
+packages:
+  FujiDropKit:
+    path: Packages/FujiDropKit
+
+targetTemplates:
+  PhotoApp:
+    type: application
+    platform: iOS
+    dependencies:
+      - package: FujiDropKit
+    settings:
+      base:
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Fuji Drop saves your picks to Photos as RAW+JPEG and reads them back to check they paired."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Fuji Drop saves your picks to Photos."
+
+targets:
+  FujiDrop:
+    templates: [PhotoApp]
+    sources: [Apps/FujiDrop]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).fujidrop
+        INFOPLIST_KEY_CFBundleDisplayName: Fuji Drop
+
+  FujiDropSpike:
+    templates: [PhotoApp]
+    sources: [Apps/Spike]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).fujidrop.spike
+        INFOPLIST_KEY_CFBundleDisplayName: X-T1 Spike
+
+schemes:
+  FujiDrop:
+    build:
+      targets:
+        FujiDrop: all
+  FujiDropSpike:
+    build:
+      targets:
+        FujiDropSpike: all
