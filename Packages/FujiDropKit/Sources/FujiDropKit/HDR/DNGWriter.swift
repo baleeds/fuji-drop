@@ -7,7 +7,7 @@ import ImageIO
 /// iOS reads DNG but can't write it, hence this minimal TIFF writer (docs/HDR-PLAN.md, step 4).
 ///
 /// Layout: IFD0 is an 8-bit sRGB preview (NewSubfileType 1), its SubIFD the main image
-/// (LinearRaw, 3 × 16-bit float, 256 px tiles, uncompressed by default), and
+/// (LinearRaw, 3 × 16-bit float or integer, 256 px tiles), and
 /// an EXIF IFD carries the reference frame's capture settings. Little-endian.
 public enum DNGWriter {
     public struct Preview: Sendable {
@@ -37,13 +37,30 @@ public enum DNGWriter {
 
     public static let tileSize = 256
 
+    public enum Compression: Sendable {
+        case none
+        /// Deflate with a predictor (floating point, or horizontal differencing). Core Image
+        /// can't decode it (checked on macOS 27, float and integer, every predictor), but
+        /// desktop editors and tifffile can.
+        case deflate
+        /// Lossless JPEG; integer samples only. What Core Image, and every DNG reader, decodes.
+        case losslessJPEG
+    }
+
+    /// A merged image: half floats.
+    public static func write(_ image: MergedImage, to url: URL, baselineExposure: Double,
+                             preview: Preview?, compression: Compression = .none, software: String = "Fuji Drop") throws {
+        try write(image.linear, to: url, baselineExposure: baselineExposure, preview: preview,
+                  compression: compression, software: software)
+    }
+
     /// - Parameters:
     ///   - baselineExposure: stops a converter should add by default (BaselineExposure).
-    ///   - compress: Deflate with the floating-point predictor, about 40 % smaller. Off by
-    ///     default: Core Image (so Photos) can't decode compressed float DNGs (checked on
-    ///     macOS 27: it falls back to the preview), while desktop editors and tifffile can.
-    public static func write(_ image: MergedImage, to url: URL, baselineExposure: Double,
-                             preview: Preview?, compress: Bool = false, software: String = "Fuji Drop") throws {
+    ///   - compression: `.losslessJPEG` for integer images Photos must read (about half size);
+    ///     half floats can only be stored uncompressed for Core Image.
+    public static func write(_ image: LinearImage, to url: URL, baselineExposure: Double,
+                             preview: Preview?, compression: Compression = .none, software: String = "Fuji Drop") throws {
+        precondition(compression != .losslessJPEG || !image.samples.isFloat, "lossless JPEG needs integer samples")
         try? FileManager.default.removeItem(at: url)
         guard FileManager.default.createFile(atPath: url.path, contents: nil),
               let file = try? FileHandle(forWritingTo: url) else { throw WriteError.cannotCreate(url.lastPathComponent) }
@@ -66,7 +83,7 @@ public enum DNGWriter {
             tiles.withUnsafeMutableBufferPointer { out in
                 let out = Shared(out)
                 DispatchQueue.concurrentPerform(iterations: tilesAcross) { col in
-                    out.value[col] = tile(image, col: col, row: row, compress: compress)
+                    out.value[col] = tile(image, col: col, row: row, compression: compression)
                 }
             }
             for t in tiles {
@@ -116,19 +133,26 @@ public enum DNGWriter {
         main.long(256, [UInt32(image.width)])
         main.long(257, [UInt32(image.height)])
         main.short(258, [16, 16, 16])
-        main.short(259, [compress ? 8 : 1])
+        main.short(259, [compression == .deflate ? 8 : compression == .losslessJPEG ? 7 : 1])
         main.short(262, [34892]) // LinearRaw
         main.short(277, [3])
         main.short(284, [1])
-        if compress { main.short(317, [3]) } // floating-point predictor
         main.long(322, [UInt32(tileSize)])
         main.long(323, [UInt32(tileSize)])
         main.long(324, tileOffsets)
         main.long(325, tileCounts)
-        main.short(339, [3, 3, 3]) // IEEE float
-        // WhiteLevel 1.0. The DNG spec makes that the default for float data, but Core Image
-        // renders float data without it as black.
-        main.long(50717, [1, 1, 1])
+        switch image.samples {
+        case .half:
+            if compression == .deflate { main.short(317, [3]) } // floating-point predictor
+            main.short(339, [3, 3, 3]) // IEEE float
+            // WhiteLevel 1.0. The DNG spec makes that the default for float data, but Core
+            // Image renders float data without it as black.
+            main.long(50717, [1, 1, 1])
+        case .integer:
+            if compression == .deflate { main.short(317, [2]) } // horizontal differencing
+            main.short(339, [1, 1, 1]) // unsigned integer
+            main.long(50717, [65535, 65535, 65535]) // black is 0: LibRaw subtracted it
+        }
         main.long(50719, [UInt32(image.crop.x), UInt32(image.crop.y)])   // DefaultCropOrigin
         main.long(50720, [UInt32(image.crop.width), UInt32(image.crop.height)]) // DefaultCropSize
 
@@ -152,7 +176,8 @@ public enum DNGWriter {
         ifd0.ascii(305, software)
         if let dateTime { ifd0.ascii(306, dateTime) }
         ifd0.add(50706, type: 1, count: 4, Data([1, 4, 0, 0])) // DNGVersion
-        ifd0.add(50707, type: 1, count: 4, Data([1, 4, 0, 0])) // DNGBackwardVersion (float data)
+        // DNGBackwardVersion: float data needs a 1.4 reader; 16-bit LinearRaw is fine at 1.1.
+        ifd0.add(50707, type: 1, count: 4, Data(image.samples.isFloat ? [1, 4, 0, 0] : [1, 1, 0, 0]))
         ifd0.ascii(50708, "\(make.capitalized) \(model)") // UniqueCameraModel
         ifd0.srational(50721, image.camXYZ.map(Double.init)) // ColorMatrix1 (XYZ → camera)
         let green = Double(image.wb[1])
@@ -179,46 +204,80 @@ public enum DNGWriter {
 
     // MARK: Tiles
 
-    /// One tile's bytes: full size (edges padded by repeating the last pixel), half floats.
-    static func tile(_ image: MergedImage, col: Int, row: Int, compress: Bool) -> Data? {
+    /// One tile's bytes: full size, edges padded by repeating the last pixel.
+    static func tile(_ image: LinearImage, col: Int, row: Int, compression: Compression) -> Data? {
+        switch image.samples {
+        case .half(let px): return halfTile(px, image, col: col, row: row, compress: compression == .deflate)
+        case .integer(let px): return integerTile(px, image, col: col, row: row, compression: compression)
+        }
+    }
+
+    /// Copies a tile's samples out of the image (edges padded).
+    private static func gather<T>(_ px: [T], _ image: LinearImage, col: Int, row: Int, zero: T) -> [T] {
         let t = tileSize
-        var halves = [Float16](repeating: 0, count: t * t * 3)
-        image.pixels.withUnsafeBufferPointer { px in
+        var out = [T](repeating: zero, count: t * t * 3)
+        px.withUnsafeBufferPointer { px in
             for y in 0..<t {
                 let sy = min(row * t + y, image.height - 1)
                 for x in 0..<t {
                     let sx = min(col * t + x, image.width - 1)
                     let s = (sy * image.width + sx) * 3, d = (y * t + x) * 3
-                    halves[d] = px[s]; halves[d + 1] = px[s + 1]; halves[d + 2] = px[s + 2]
+                    out[d] = px[s]; out[d + 1] = px[s + 1]; out[d + 2] = px[s + 2]
                 }
             }
         }
+        return out
+    }
+
+    private static func halfTile(_ px: [Float16], _ image: LinearImage, col: Int, row: Int, compress: Bool) -> Data? {
+        let t = tileSize
+        let halves = gather(px, image, col: col, row: row, zero: 0)
         var bytes = [UInt8](repeating: 0, count: halves.count * 2)
-        if compress {
-            let stride = 3 // samples per pixel
-            // TIFF floating-point predictor (Technical Note 3), per row: bytes regrouped by
-            // significance (most significant first), then differenced across samples.
-            let samples = t * 3
-            halves.withUnsafeBufferPointer { h in
-                for y in 0..<t {
-                    let base = y * samples * 2
-                    for i in 0..<samples {
-                        let bits = h[y * samples + i].bitPattern
-                        bytes[base + i] = UInt8(bits >> 8)
-                        bytes[base + samples + i] = UInt8(bits & 0xFF)
-                    }
-                    var i = samples * 2 - 1
-                    while i >= stride {
-                        bytes[base + i] = bytes[base + i] &- bytes[base + i - stride]
-                        i -= 1
-                    }
-                }
-            }
-            return zlib(bytes)
-        } else {
+        guard compress else {
             halves.withUnsafeBytes { raw in bytes = [UInt8](raw) } // little-endian, as the header says
             return Data(bytes)
         }
+        // TIFF floating-point predictor (Technical Note 3), per row: bytes regrouped by
+        // significance (most significant first), then differenced across samples.
+        let stride = 3, samples = t * 3
+        halves.withUnsafeBufferPointer { h in
+            for y in 0..<t {
+                let base = y * samples * 2
+                for i in 0..<samples {
+                    let bits = h[y * samples + i].bitPattern
+                    bytes[base + i] = UInt8(bits >> 8)
+                    bytes[base + samples + i] = UInt8(bits & 0xFF)
+                }
+                var i = samples * 2 - 1
+                while i >= stride {
+                    bytes[base + i] = bytes[base + i] &- bytes[base + i - stride]
+                    i -= 1
+                }
+            }
+        }
+        return zlib(bytes)
+    }
+
+    private static func integerTile(_ px: [UInt16], _ image: LinearImage, col: Int, row: Int,
+                                    compression: Compression) -> Data? {
+        let t = tileSize
+        var values = gather(px, image, col: col, row: row, zero: 0)
+        if compression == .losslessJPEG {
+            return values.withUnsafeBufferPointer { LosslessJPEG.encode($0, width: t, height: t, components: 3) }
+        }
+        let compress = compression == .deflate
+        if compress {
+            // Predictor 2: each sample minus the same channel of the pixel to its left.
+            for y in 0..<t {
+                var i = (y + 1) * t * 3 - 1
+                while i >= y * t * 3 + 3 {
+                    values[i] = values[i] &- values[i - 3]
+                    i -= 1
+                }
+            }
+        }
+        let bytes = values.withUnsafeBytes { [UInt8]($0) } // little-endian, as the header says
+        return compress ? zlib(bytes) : Data(bytes)
     }
 
     /// A zlib stream (RFC 1950: header, raw DEFLATE, Adler-32), which TIFF Deflate expects;

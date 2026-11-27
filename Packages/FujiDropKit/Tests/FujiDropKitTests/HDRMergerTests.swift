@@ -1,4 +1,4 @@
-import FujiDropKit
+@testable import FujiDropKit
 import XCTest
 
 /// Synthetic brackets: one linear scene, captured at several exposures with clipping, should
@@ -176,5 +176,28 @@ final class HDRMergerTests: XCTestCase {
                 XCTAssertEqual(Float(out[a]), Float(out[b]), accuracy: 1e-3, "row \(y)")
             }
         }
+    }
+}
+
+final class MedianNetworkTests: XCTestCase {
+    /// The pruned network gives the true median of 25 values, 8 lanes at a time.
+    func testMedianNetworkMatchesSorting() {
+        var rng = SystemRandomNumberGenerator()
+        for trial in 0..<2000 {
+            var lanes = [[Float]](repeating: [], count: 8)
+            for l in 0..<8 {
+                // Mix of random, duplicated and sorted/reversed inputs.
+                switch (trial + l) % 4 {
+                case 0: lanes[l] = (0..<25).map { _ in Float.random(in: -5...5, using: &rng) }
+                case 1: lanes[l] = (0..<25).map { _ in Float(Int.random(in: 0...3, using: &rng)) }
+                case 2: lanes[l] = (0..<25).map(Float.init)
+                default: lanes[l] = (0..<25).map { Float(25 - $0) }
+                }
+            }
+            var v = (0..<25).map { k in SIMD8<Float>((0..<8).map { lanes[$0][k] }) }
+            let m = v.withUnsafeMutableBufferPointer { ColorCleanup.median25($0.baseAddress!) }
+            for l in 0..<8 { XCTAssertEqual(m[l], lanes[l].sorted()[12]) }
+        }
+        XCTAssertLessThan(ColorCleanup.medianNetwork.count, 200)
     }
 }

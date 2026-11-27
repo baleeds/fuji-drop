@@ -120,6 +120,12 @@ final class ImportModel: ObservableObject {
     @Published private(set) var saved: [String: String] =
         (UserDefaults.standard.dictionary(forKey: ImportModel.savedKey) as? [String: String]) ?? [:]
     private static let savedKey = "saved.v1"
+    /// The format each save used (`SaveFormat`), by `Shot.key`, so changing the setting later
+    /// neither re-saves anything nor leaves it unclear what's in Photos. Absent = RAF (saves
+    /// from before the setting existed).
+    private(set) var savedFormats: [String: String] =
+        (UserDefaults.standard.dictionary(forKey: ImportModel.savedFormatsKey) as? [String: String]) ?? [:]
+    private static let savedFormatsKey = "savedFormats.v1"
     /// Saves selections to Photos in the background (see `SaveQueue`).
     lazy var saves = SaveQueue(model: self)
     @Published var grouper = MomentGrouper() {
@@ -845,6 +851,8 @@ final class ImportModel: ObservableObject {
             Task {
                 guard await PhotoSaver.delete(assetID: asset) else { return }
                 saved[key] = nil
+                savedFormats[key] = nil
+                UserDefaults.standard.set(savedFormats, forKey: Self.savedFormatsKey)
                 UserDefaults.standard.set(saved, forKey: Self.savedKey)
                 picks.remove(key)
                 persistPicks()
@@ -858,9 +866,11 @@ final class ImportModel: ObservableObject {
 
     /// A save finished. Also (re)selects it: it's in Photos now, even if it was deselected
     /// while being written.
-    func markSaved(key: String, assetID: String) {
+    func markSaved(key: String, assetID: String, format: SaveFormat) {
         saved[key] = assetID
         UserDefaults.standard.set(saved, forKey: Self.savedKey)
+        savedFormats[key] = format.rawValue
+        UserDefaults.standard.set(savedFormats, forKey: Self.savedFormatsKey)
         if picks.insert(key).inserted { persistPicks() }
     }
 

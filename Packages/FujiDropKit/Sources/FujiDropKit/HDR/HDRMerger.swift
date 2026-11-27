@@ -3,6 +3,45 @@ import Foundation
 import simd
 import Vision
 
+/// Linear camera-native RGB with what a linear DNG needs: a merge (half floats, 1.0 = the
+/// brightest value) or a single frame (16-bit integers, 65535 = sensor saturation).
+public struct LinearImage: @unchecked Sendable {
+    public enum Samples: Sendable {
+        case half([Float16])
+        case integer([UInt16])
+
+        var isFloat: Bool { if case .half = self { return true } else { return false } }
+    }
+
+    public var width: Int
+    public var height: Int
+    /// Interleaved camera-native RGB (not white-balanced).
+    public var samples: Samples
+    /// The DNG's default crop (pixels).
+    public var crop: (x: Int, y: Int, width: Int, height: Int)
+    /// As-shot white-balance multipliers (R, G, B).
+    public var wb: [Float]
+    /// XYZ (D65) → camera, 3×3 row-major.
+    public var camXYZ: [Float]
+    public var make: String
+    public var model: String
+    /// ImageIO properties of the source (reference) RAF, for EXIF.
+    public var properties: [String: Any]
+
+    public init(width: Int, height: Int, samples: Samples, crop: (x: Int, y: Int, width: Int, height: Int),
+                wb: [Float], camXYZ: [Float], make: String, model: String, properties: [String: Any]) {
+        self.width = width
+        self.height = height
+        self.samples = samples
+        self.crop = crop
+        self.wb = wb
+        self.camXYZ = camXYZ
+        self.make = make
+        self.model = model
+        self.properties = properties
+    }
+}
+
 /// A merged bracket: linear camera-native RGB, ready for a linear DNG.
 public struct MergedImage: @unchecked Sendable {
     public var width: Int
@@ -25,6 +64,12 @@ public struct MergedImage: @unchecked Sendable {
     public var scale: Float
     /// One line per frame (scale, shift), for the log.
     public var report: [String]
+
+    /// The same pixels (shared, not copied) as a DNG source.
+    public var linear: LinearImage {
+        LinearImage(width: width, height: height, samples: .half(pixels), crop: crop, wb: wb, camXYZ: camXYZ,
+                    make: make, model: model, properties: properties)
+    }
 }
 
 /// Merges an exposure bracket into one linear image (see docs/HDR-PLAN.md, step 3).

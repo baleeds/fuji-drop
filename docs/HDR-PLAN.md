@@ -6,20 +6,23 @@ LibRaw's Markesteijn demosaic instead of Apple's RAW engine, because X-Trans ren
 many editors. Written Nov 27, 2026 for a session on the local Mac, which has the X-T1, the
 iPhone, Xcode and a desktop editor. Read `docs/HANDOFF.md` first for how the app works.
 
-## Status (Nov 27, 2026): HDR path built, DNG saves not yet; nothing checked on the phone
+## Status (Nov 27, 2026): all six steps built; nothing checked on the phone yet
 
-Built ahead of the reordered plan: steps 1, 4, 5 and 6, plus step 2's **half-float** format.
-**Not built: step 3** (DNG for every save) and step 2's **16-bit integer** format. Verified on the Mac with the owner's own brackets
-(DSCF2729–2731, handheld AE BKT ±1; DSCF2527–2529, AE BKT with auto ISO and people walking):
-aligned, ghost-free at 100 %, brightness matching the camera's JPEG, about 10 s per bracket on
-an M-series Mac. Not yet run on the iPhone: check merge time, memory, and that Photos accepts
-the DNG as the RAW of a RAW+JPEG pair.
+Steps 1–6 are implemented. Verified on the Mac with the owner's own files: brackets
+DSCF2729–2731 (handheld AE BKT ±1) and DSCF2527–2529 (AE BKT with auto ISO, people walking)
+merge aligned and ghost-free at 100 % in about 8 s; a single DNG save (DSCF3218) takes 3.0 s
+and 51 MB, and its lossless JPEG tiles decode bit-identical to an uncompressed copy in an
+independent decoder (tifffile + imagecodecs). Not yet run on the iPhone: check save and
+merge times, memory, and that Photos accepts the DNG as the RAW of a RAW+JPEG pair.
 
-Code: `HDR/` in FujiDropKit (`XTransDecoder`, `HDRMerger`, `ColorCleanup`, `DNGWriter`,
-`HDRPipeline`, `MergeCache`, `Acknowledgements`), `Moments/Brackets.swift`, and in the app
-`ImportModel` (brackets, merged frames), `MomentViewer` (Merge button) and `SaveQueue`.
-Real-file tests: `FUJIDROP_TEST_RAF=<raf>` and `FUJIDROP_TEST_BRACKET=<raf>,<raf>,<raf>`
-(optionally `FUJIDROP_TEST_OUT=<dir>`), best with `swift test -c release`.
+Code: `HDR/` in FujiDropKit (`XTransDecoder`, `ColorCleanup`, `DNGWriter`, `LosslessJPEG`,
+`LinearRenderer`, `DNGConverter`, `HDRMerger`, `HDRPipeline`, `MergeCache`,
+`Acknowledgements`), `Moments/Brackets.swift`, and in the app `SaveQueue` (`SaveFormat`, DNG
+saves, kept RAFs), `TuningView` (Settings › Saving), `ImportModel` (brackets, merged frames,
+`savedFormats.v1`) and `MomentViewer` (Merge button).
+Real-file tests: `FUJIDROP_TEST_RAF=<raf>`, `FUJIDROP_TEST_BRACKET=<raf>,<raf>,<raf>` and the
+tone-curve calibration `FUJIDROP_TEST_RAFS=<raf>,…` (optionally `FUJIDROP_TEST_OUT=<dir>` to
+keep outputs), best with `swift test -c release`.
 
 Where the build differs from the plan below, and why:
 
@@ -52,13 +55,21 @@ Where the build differs from the plan below, and why:
   was pruned), so compare and `SaveQueue` work unchanged; saving reuses the merge's JPEG.
   Merges are kept in `Caches/Merges` (8 most recent) and remembered in `merges.v1`.
 
-Still to do: step 3 and the integer DNG format; on-device timing and memory; Photos accepting
-the DNG pair; `dng_validate` and a desktop editor check (Lightroom / Capture One); the
-high-ISO and DR-mode fixtures from the list below.
+- **DNG saves use lossless JPEG, not Deflate.** Core Image doesn't decode Deflate in DNGs at
+  all (16-bit integer with Predictor 2 failed too). Lossless JPEG (Compression 7, our own
+  `LosslessJPEG` encoder) is what camera DNGs use and Core Image reads it: 51 MB per frame.
+- **Tone curve chosen by measurement.** `LinearRendererTests` renders 16 of the owner's frames
+  with four curves at matched brightness and scores them against the camera's JPEG. ACES
+  (Narkowicz fit, per channel) was closest on 15 of 16 (8.4 levels mean difference; log S
+  11.4, none 14.9, Hable 16.3). HDR merges now render their JPEG and preview the same way.
+- **The 5×5 median runs 8 pixels at a time** through a sorting network (Batcher, pruned to the
+  middle element) with `simd_min`/`simd_max`: cleanup went from 2.4 s to 0.28 s per frame,
+  bit-identical output.
 
-**Before building step 3:** check that Core Image decodes a Deflate-compressed 16-bit
-*integer* LinearRaw DNG (Predictor 2). It refused every compressed *float* variant, and the
-step's 45–55 MB size target depends on compression; uncompressed integer would be ~95 MB.
+Still to do: everything on the phone (times, memory, Photos accepting DNG pairs and showing
+them as RAW+JPEG, `PhotoSaver.editingBase`); `dng_validate`; Lightroom / Capture One (do the
+Fujifilm camera profiles and lens corrections still apply to the DNG?); comparing DNG saves at
+100 % with RAF saves; the high-ISO and DR-mode fixtures from the list below.
 
 ## Decisions already made
 

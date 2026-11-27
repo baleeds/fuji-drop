@@ -75,32 +75,35 @@ public enum RAWRenderer {
     public static func renderJPEG(from raw: URL, image: CGImage? = nil, matching reference: CGImage? = nil,
                                   into directory: URL? = nil, quality: Double = 0.92) throws -> URL {
         let cg = try image ?? renderImage(from: raw, matching: reference)
+        let out = (directory ?? raw.deletingLastPathComponent())
+            .appendingPathComponent(raw.deletingPathExtension().lastPathComponent)
+            .appendingPathExtension("JPG")
+        try writeJPEG(cg, metadataFrom: raw, to: out, quality: quality)
+        return out
+    }
 
+    /// Writes an upright image as a JPEG with `source`'s EXIF, TIFF and GPS metadata (capture
+    /// date, camera, lens), orientation reset to 1.
+    public static func writeJPEG(_ cg: CGImage, metadataFrom source: URL, to out: URL, quality: Double = 0.92) throws {
         var props: [CFString: Any] = [:]
-        if let src = CGImageSourceCreateWithURL(raw as CFURL, nil),
+        if let src = CGImageSourceCreateWithURL(source as CFURL, nil),
            let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
             for key in [kCGImagePropertyExifDictionary, kCGImagePropertyTIFFDictionary,
                         kCGImagePropertyGPSDictionary, kCGImagePropertyExifAuxDictionary] {
                 if let value = p[key] { props[key] = value }
             }
         }
-        // CIRAWFilter output is already upright.
         props[kCGImagePropertyOrientation] = 1
         if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
             tiff[kCGImagePropertyTIFFOrientation] = 1
             props[kCGImagePropertyTIFFDictionary] = tiff
         }
         props[kCGImageDestinationLossyCompressionQuality] = quality
-
-        let out = (directory ?? raw.deletingLastPathComponent())
-            .appendingPathComponent(raw.deletingPathExtension().lastPathComponent)
-            .appendingPathExtension("JPG")
         try? FileManager.default.removeItem(at: out)
         guard let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             throw RenderError.cannotWrite(out.lastPathComponent)
         }
         CGImageDestinationAddImage(dest, cg, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw RenderError.cannotWrite(out.lastPathComponent) }
-        return out
     }
 }

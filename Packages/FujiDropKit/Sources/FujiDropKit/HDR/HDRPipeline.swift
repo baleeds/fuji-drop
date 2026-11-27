@@ -55,14 +55,25 @@ public enum HDRPipeline {
         let small = downsample(merged, factor: 4)
         let probeURL = directory.appendingPathComponent("\(name)-probe.dng")
         defer { try? FileManager.default.removeItem(at: probeURL) }
-        try DNGWriter.write(small, to: probeURL, baselineExposure: 0, preview: nil, compress: false)
+        try DNGWriter.write(small, to: probeURL, baselineExposure: 0, preview: nil)
         let cameraJPEG = previews.indices.contains(reference) ? previews[reference].flatMap(cgImage) : nil
         var baseline = Double(log2(merged.scale))
         if let cameraJPEG, let measured = measureExposure(probeURL, against: cameraJPEG) {
             baseline = Double(measured)
         }
         report.append(String(format: "BaselineExposure %+.2f (data scale %+.2f stops)", baseline, log2(merged.scale)))
-        let preview = renderPreview(probeURL, exposure: Float(baseline), maxSide: 1024)
+
+        // The JPEG (and the DNG's preview) from the merged data with `LinearRenderer`, like
+        // DNG saves: white-balanced, in units of the reference frame's saturation, so the
+        // tone curve's shoulder rolls off the highlights the merge recovered.
+        let gain = SIMD3(merged.wb[0], merged.wb[1], merged.wb[2]) * merged.scale
+        let px = merged.pixels
+        let load: (Int) -> SIMD3<Float> = { i in SIMD3(Float(px[i * 3]), Float(px[i * 3 + 1]), Float(px[i * 3 + 2])) * gain }
+        let w = merged.width, h = merged.height
+        let ev = cameraJPEG.map { LinearRenderer.matchExposure(width: w, height: h, camXYZ: merged.camXYZ, reference: $0, load: load) } ?? 0
+        let factor = max(1, (w + 1023) / 1024)
+        let preview = LinearRenderer.render(width: w, height: h, camXYZ: merged.camXYZ, exposure: ev, factor: factor,
+                                            load: load).flatMap(DNGConverter.rgbPreview)
 
         progress("Writing DNG")
         let dng = directory.appendingPathComponent("\(name).DNG")
@@ -70,8 +81,15 @@ public enum HDRPipeline {
         lap("Wrote \(dng.lastPathComponent)")
 
         progress("Rendering JPEG")
-        let jpeg = try RAWRenderer.renderJPEG(from: dng, into: directory)
-        lap("Rendered \(jpeg.lastPathComponent)")
+        guard let full = LinearRenderer.render(width: w, height: h, camXYZ: merged.camXYZ, exposure: ev, load: load) else {
+            throw RAWRenderer.RenderError.cannotRender(name)
+        }
+        // Cropped to the area every frame covers, like the DNG's default crop.
+        let c = merged.crop
+        let cropped = full.cropping(to: CGRect(x: c.x, y: c.y, width: c.width, height: c.height)) ?? full
+        let jpeg = directory.appendingPathComponent("\(name).JPG")
+        try RAWRenderer.writeJPEG(cropped, metadataFrom: raws[reference], to: jpeg)
+        lap(String(format: "Rendered %@ (%+.2f EV)", jpeg.lastPathComponent, ev))
         return Output(dng: dng, jpeg: jpeg, report: report)
     }
 
@@ -116,24 +134,5 @@ public enum HDRPipeline {
             ev += Brightness.stops(toMatch: target, from: probe)
         }
         return min(max(ev, -4), 8)
-    }
-
-    /// An sRGB preview of a DNG rendered at `exposure` stops (added to its default).
-    static func renderPreview(_ dng: URL, exposure: Float, maxSide: Int) -> DNGWriter.Preview? {
-        guard let filter = CIRAWFilter(imageURL: dng) else { return nil }
-        filter.exposure = exposure
-        guard var image = filter.outputImage else { return nil }
-        let scale = min(1, CGFloat(maxSide) / max(image.extent.width, image.extent.height))
-        image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let extent = image.extent.integral
-        let w = Int(extent.width), h = Int(extent.height)
-        var rgba = [UInt8](repeating: 0, count: w * h * 4)
-        RAWRenderer.context.render(image, toBitmap: &rgba, rowBytes: w * 4, bounds: extent, format: .RGBA8,
-                                   colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
-        var rgb = [UInt8](repeating: 0, count: w * h * 3)
-        for i in 0..<w * h {
-            rgb[i * 3] = rgba[i * 4]; rgb[i * 3 + 1] = rgba[i * 4 + 1]; rgb[i * 3 + 2] = rgba[i * 4 + 2]
-        }
-        return DNGWriter.Preview(width: w, height: h, rgb: rgb)
     }
 }

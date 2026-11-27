@@ -9,8 +9,37 @@ import UIKit
 /// merge rendered the same way (the DNG is the editing base). About 3 s per pick; less if compare already
 /// downloaded and decoded the RAF. The next pick's RAF downloads while this one renders.
 ///
+/// With Settings › Save RAW as › DNG, a camera frame is converted on the phone instead
+/// (`DNGConverter`: LibRaw decode, linear DNG, JPEG from the same decode) and the DNG becomes
+/// the editing base; "Also keep RAF files" copies the original into the app's Files folder.
+///
 /// Survives unplugging: `ImportModel.rawURL` waits for the camera to come back. Ending the
 /// session (or a different camera) clears the queue.
+/// How a camera frame's RAW is saved (Settings › Save RAW as).
+enum SaveFormat: String, CaseIterable, Identifiable {
+    /// The camera's RAF, with a JPEG from Apple's RAW engine.
+    case raf
+    /// A linear DNG from LibRaw (sharper detail, less false colour), with a JPEG from the same decode.
+    case dng
+    /// A merged HDR frame (always DNG); recorded, never chosen in Settings.
+    case hdr
+
+    var id: String { rawValue }
+    static let key = "saveFormat"
+    static let keepRAFKey = "keepRAF"
+
+    /// The format chosen in Settings: RAF until DNG saves are checked on the phone.
+    static var current: SaveFormat {
+        SaveFormat(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .raf
+    }
+
+    /// Where "Also keep RAF files" puts originals: Documents/RAF, visible in the Files app.
+    static var keptRAFFolder: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("RAF", isDirectory: true)
+    }
+}
+
 @MainActor
 final class SaveQueue: ObservableObject {
     struct Progress: Equatable {
@@ -249,8 +278,23 @@ final class SaveQueue: ObservableObject {
                 try FileManager.default.copyItem(at: mergedJPEG, to: jpeg)
             }
             let assetID = try await PhotoSaver.savePair(jpeg: jpeg, raw: raw, creationDate: shot.date)
-            model.markSaved(key: item.key, assetID: assetID)
+            model.markSaved(key: item.key, assetID: assetID, format: .hdr)
             model.camera.record(String(format: "Saved %@ (HDR DNG) to Photos in %.1f s", item.id, Date().timeIntervalSince(started)))
+            return
+        }
+
+        if SaveFormat.current == .dng {
+            // LibRaw decode → linear DNG + a JPEG from the same pixels.
+            let preview = shot.previewURL, name = shot.id
+            let output = try await Background.raw { () -> Result<DNGConverter.Output, Error> in
+                Result { try DNGConverter.convert(raw: raw, preview: preview, name: name, into: folder) }
+            }.get()
+            try Task.checkCancellation()
+            if UserDefaults.standard.bool(forKey: SaveFormat.keepRAFKey) { keepOriginal(raw, size: shot.size) }
+            let assetID = try await PhotoSaver.savePair(jpeg: output.jpeg, raw: output.dng, creationDate: shot.date)
+            model.markSaved(key: item.key, assetID: assetID, format: .dng)
+            output.report.forEach { model.camera.record("DNG \(item.id): \($0)") }
+            model.camera.record(String(format: "Saved %@ (DNG) to Photos in %.1f s", item.id, Date().timeIntervalSince(started)))
             return
         }
 
@@ -267,7 +311,28 @@ final class SaveQueue: ObservableObject {
         try Task.checkCancellation()
 
         let assetID = try await PhotoSaver.savePair(jpeg: jpeg, raw: raw, creationDate: shot.date)
-        model.markSaved(key: item.key, assetID: assetID)
+        model.markSaved(key: item.key, assetID: assetID, format: .raf)
         model.camera.record(String(format: "Saved %@ to Photos in %.1f s", item.id, Date().timeIntervalSince(started)))
+    }
+
+    /// Copies the RAF into Documents/RAF (the Files app). A Photos asset holds one RAW, so with
+    /// DNG saves this is the only place the original survives. A different file with the same
+    /// name (another card) gets its size appended. Best effort: a failure doesn't stop the save.
+    private func keepOriginal(_ raw: URL, size: Int64) {
+        let folder = SaveFormat.keptRAFFolder
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var target = folder.appendingPathComponent(raw.lastPathComponent)
+        if let existing = (try? fm.attributesOfItem(atPath: target.path))?[.size] as? Int64 {
+            if existing == size { return }
+            let base = raw.deletingPathExtension().lastPathComponent
+            target = folder.appendingPathComponent("\(base)-\(size).\(raw.pathExtension)")
+            if fm.fileExists(atPath: target.path) { return }
+        }
+        do {
+            try fm.copyItem(at: raw, to: target)
+        } catch {
+            model.camera.record("Keeping \(raw.lastPathComponent) failed: \(error.localizedDescription)")
+        }
     }
 }

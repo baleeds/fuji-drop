@@ -1,10 +1,11 @@
 import Foundation
+import simd
 
 /// False-colour suppression for X-Trans demosaicing, ported from `clean()` in
 /// `tools/demosaic-compare/compare.py` (the study measured −47 % false colour for −3 % detail):
 /// take log(rgb / luminance) ratios, median-filter them (5×5, two passes), and put the
-/// original luminance back. Runs once on the merged image, white-balanced (so neutral is
-/// ratio 0), in strips across the cores.
+/// original luminance back. Runs on white-balanced data (so neutral is ratio 0), in strips
+/// across the cores: once on a merged image, or on a single frame for DNG saves.
 public enum ColorCleanup {
     static let radius = 2
     static let passes = 2
@@ -18,25 +19,57 @@ public enum ColorCleanup {
     public static func clean(_ rgb: [Float], width: Int, height: Int, whiteBalance wb: [Float],
                              scale: Float = 1) -> [Float16] {
         var out = [Float16](repeating: 0, count: rgb.count)
-        let strips = (height + strip - 1) / strip
+        let gain = SIMD3(wb[0], wb[1], wb[2])
         rgb.withUnsafeBufferPointer { src in
             out.withUnsafeMutableBufferPointer { dst in
                 let dst = Shared(dst)
-                DispatchQueue.concurrentPerform(iterations: strips) { s in
-                    cleanStrip(src, rows: s * strip..<min(height, (s + 1) * strip), width: width,
-                               height: height, wb: wb, scale: scale, out: dst.value)
-                }
+                run(width: width, height: height, load: { i in
+                    SIMD3(src[i * 3], src[i * 3 + 1], src[i * 3 + 2]) * gain
+                }, store: { i, v in
+                    let n = v / gain * scale
+                    dst.value[i * 3] = Float16(n.x); dst.value[i * 3 + 1] = Float16(n.y); dst.value[i * 3 + 2] = Float16(n.z)
+                })
             }
         }
         return out
+    }
+
+    /// Cleans a decoded frame (LibRaw's white-balanced 16-bit output) and returns it
+    /// camera-native (white balance divided out), still 16-bit: 65535 = sensor saturation.
+    public static func clean(_ frame: XTransImage) -> [UInt16] {
+        var out = [UInt16](repeating: 0, count: frame.pixels.count)
+        let gain = SIMD3(frame.wb[0], frame.wb[1], frame.wb[2])
+        frame.pixels.withUnsafeBufferPointer { src in
+            out.withUnsafeMutableBufferPointer { dst in
+                let dst = Shared(dst)
+                run(width: frame.width, height: frame.height, load: { i in
+                    SIMD3(Float(src[i * 3]), Float(src[i * 3 + 1]), Float(src[i * 3 + 2]))
+                }, store: { i, v in
+                    let n = (v / gain).rounded(.toNearestOrAwayFromZero)
+                    let c = n.clamped(lowerBound: .zero, upperBound: SIMD3(repeating: 65535))
+                    dst.value[i * 3] = UInt16(c.x); dst.value[i * 3 + 1] = UInt16(c.y); dst.value[i * 3 + 2] = UInt16(c.z)
+                })
+            }
+        }
+        return out
+    }
+
+    /// The filter over any source: `load(pixel)` gives white-balanced RGB, `store(pixel, rgb)`
+    /// receives the cleaned white-balanced RGB. Strips run concurrently; each pixel is stored once.
+    static func run(width: Int, height: Int, load: (Int) -> SIMD3<Float>, store: (Int, SIMD3<Float>) -> Void) {
+        let strips = (height + strip - 1) / strip
+        DispatchQueue.concurrentPerform(iterations: strips) { s in
+            cleanStrip(rows: s * strip..<min(height, (s + 1) * strip), width: width, height: height,
+                       load: load, store: store)
+        }
     }
 
     @inline(__always) static func lum(_ r: Float, _ g: Float, _ b: Float) -> Float {
         0.2126 * r + 0.7152 * g + 0.0722 * b
     }
 
-    private static func cleanStrip(_ src: UnsafeBufferPointer<Float>, rows: Range<Int>, width w: Int, height h: Int,
-                                   wb: [Float], scale: Float, out: UnsafeMutableBufferPointer<Float16>) {
+    private static func cleanStrip(rows: Range<Int>, width w: Int, height h: Int,
+                                   load: (Int) -> SIMD3<Float>, store: (Int, SIMD3<Float>) -> Void) {
         let margin = radius * passes
         let top = max(0, rows.lowerBound - margin), bottom = min(h, rows.upperBound + margin)
         let n = bottom - top
@@ -44,8 +77,8 @@ public enum ColorCleanup {
         var ratio = [Float](repeating: 0, count: n * w * 3)
         for y in top..<bottom {
             for x in 0..<w {
-                let i = (y * w + x) * 3
-                let r = src[i] * wb[0], g = src[i + 1] * wb[1], b = src[i + 2] * wb[2]
+                let p = load(y * w + x)
+                let r = p.x, g = p.y, b = p.z
                 let l = max(lum(r, g, b), 1e-5)
                 let o = (y - top) * w + x
                 ratio[o] = log(max(r, 1e-5) / l)
@@ -62,21 +95,36 @@ public enum ColorCleanup {
             let nextBottom = validBottom == h ? h : validBottom - radius
             ratio.withUnsafeBufferPointer { inp in
                 filtered.withUnsafeMutableBufferPointer { outp in
-                    withUnsafeTemporaryAllocation(of: Float.self, capacity: 25) { window in
+                    withUnsafeTemporaryAllocation(of: SIMD8<Float>.self, capacity: 25) { window in
+                        let window = window.baseAddress!
                         for c in 0..<3 {
                             let plane = c * n * w
                             for y in nextTop..<nextBottom {
-                                for x in 0..<w {
+                                var rows = [Int](repeating: 0, count: 5)
+                                for dy in -radius...radius {
+                                    rows[dy + radius] = plane + (min(max(y + dy, validTop), validBottom - 1) - top) * w
+                                }
+                                // 8 pixels at a time through the median network.
+                                var x = 0
+                                while x < w {
                                     var k = 0
-                                    for dy in -radius...radius {
-                                        let yy = min(max(y + dy, validTop), validBottom - 1) - top
+                                    for r in rows {
                                         for dx in -radius...radius {
-                                            let xx = min(max(x + dx, 0), w - 1)
-                                            window[k] = inp[plane + yy * w + xx]
+                                            var v = SIMD8<Float>()
+                                            if x + dx >= 0, x + dx + 7 < w {
+                                                v = UnsafeRawPointer(inp.baseAddress! + r + x + dx)
+                                                    .loadUnaligned(as: SIMD8<Float>.self)
+                                            } else {
+                                                for l in 0..<8 { v[l] = inp[r + min(max(x + l + dx, 0), w - 1)] }
+                                            }
+                                            window[k] = v
                                             k += 1
                                         }
                                     }
-                                    outp[plane + (y - top) * w + x] = median(window.baseAddress!, 25)
+                                    let m = median25(window)
+                                    let o = plane + (y - top) * w
+                                    for l in 0..<min(8, w - x) { outp[o + x + l] = m[l] }
+                                    x += 8
                                 }
                             }
                         }
@@ -87,22 +135,65 @@ public enum ColorCleanup {
             validTop = nextTop
             validBottom = nextBottom
         }
-        // Back to RGB with the original luminance, then without white balance.
+        // Back to RGB with the original luminance.
         for y in rows {
             for x in 0..<w {
-                let i = (y * w + x) * 3
-                let r0 = src[i] * wb[0], g0 = src[i + 1] * wb[1], b0 = src[i + 2] * wb[2]
-                let l = max(lum(r0, g0, b0), 1e-5)
+                let p = load(y * w + x)
+                let l = max(lum(p.x, p.y, p.z), 1e-5)
                 let o = (y - top) * w + x
-                var r = exp(ratio[o]) * l, g = exp(ratio[n * w + o]) * l, b = exp(ratio[2 * n * w + o]) * l
-                let fix = l / max(lum(r, g, b), 1e-5)
-                r *= fix; g *= fix; b *= fix
-                out[i] = Float16(r / wb[0] * scale)
-                out[i + 1] = Float16(g / wb[1] * scale)
-                out[i + 2] = Float16(b / wb[2] * scale)
+                let rgb = SIMD3(exp(ratio[o]), exp(ratio[n * w + o]), exp(ratio[2 * n * w + o])) * l
+                store(y * w + x, rgb * (l / max(lum(rgb.x, rgb.y, rgb.z), 1e-5)))
             }
         }
     }
+
+    /// Compare-exchanges that put the median (index 12) of 25 values in place: Batcher's
+    /// odd-even merge sort for 25 wires, pruned to the comparators the middle wire depends on.
+    static let medianNetwork: [(Int, Int)] = {
+        let n = 25
+        var all: [(Int, Int)] = []
+        var p = 1
+        while p < n {
+            var k = p
+            while k >= 1 {
+                var j = k % p
+                while j <= n - 1 - k {
+                    for i in 0...min(k - 1, n - j - k - 1) where (i + j) / (2 * p) == (i + j + k) / (2 * p) {
+                        all.append((i + j, i + j + k))
+                    }
+                    j += 2 * k
+                }
+                k /= 2
+            }
+            p *= 2
+        }
+        var needed: Set<Int> = [n / 2]
+        var kept: [(Int, Int)] = []
+        for c in all.reversed() where needed.contains(c.0) || needed.contains(c.1) {
+            kept.append(c)
+            needed.insert(c.0)
+            needed.insert(c.1)
+        }
+        return kept.reversed()
+    }()
+
+    /// The medians of 8 windows of 25 at once, branchless. Reorders `v`.
+    @inline(__always) static func median25(_ v: UnsafeMutablePointer<SIMD8<Float>>) -> SIMD8<Float> {
+        networkPairs.withUnsafeBufferPointer { pairs in
+            var i = 0
+            while i < pairs.count {
+                let a = pairs[i], b = pairs[i + 1]
+                let x = v[a], y = v[b]
+                v[a] = simd_min(x, y)
+                v[b] = simd_max(x, y)
+                i += 2
+            }
+        }
+        return v[12]
+    }
+
+    /// `medianNetwork` flattened (a, b, a, b, …) for the inner loop.
+    private static let networkPairs: [Int] = medianNetwork.flatMap { [$0.0, $0.1] }
 
     /// Median by Wirth's selection; reorders `a`.
     @inline(__always) static func median(_ a: UnsafeMutablePointer<Float>, _ n: Int) -> Float {

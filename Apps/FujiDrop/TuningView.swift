@@ -10,6 +10,8 @@ struct TuningView: View {
     let clearCache: () -> Void
     let disconnect: () -> Void
     @AppStorage("showGroupingDetails") private var showDetails = false
+    @AppStorage(SaveFormat.key) private var saveFormat = SaveFormat.raf
+    @AppStorage(SaveFormat.keepRAFKey) private var keepRAF = false
     @State private var confirmClear = false
     @Environment(\.dismiss) private var dismiss
 
@@ -38,6 +40,21 @@ struct TuningView: View {
                     LabeledContent("Current", value: summary).font(.caption.monospaced())
                 } footer: {
                     Text("Details show each frame's file name, time gap and visual distance (Δ) from the previous frame.")
+                }
+                Section {
+                    Picker("Save RAW as", selection: $saveFormat) {
+                        Text("RAF (original)").tag(SaveFormat.raf)
+                        Text("DNG (sharper detail)").tag(SaveFormat.dng)
+                    }
+                    if saveFormat == .dng {
+                        Toggle("Also keep RAF files", isOn: $keepRAF)
+                    }
+                } header: {
+                    Text("Saving")
+                } footer: {
+                    Text(saveFormat == .raf
+                         ? "Saves the camera's RAF with a JPEG, as Photos imports from a camera."
+                         : "Converts each photo on the phone (a few seconds): sharper fine detail and less false colour than Apple's RAW engine, with a JPEG from the same conversion. Photos keeps one RAW per photo, so the RAF isn't in Photos; turn on Also keep RAF files to copy originals to Fuji Drop's folder in the Files app. Fujifilm camera profiles in Lightroom may not apply to the DNG.")
                 }
                 Section {
                     LabeledContent("Saved previews",

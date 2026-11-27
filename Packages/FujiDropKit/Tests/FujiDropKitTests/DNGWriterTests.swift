@@ -94,6 +94,42 @@ final class DNGWriterTests: XCTestCase {
         XCTAssertGreaterThan(try render(dng).left.y, 80) // the main image still decodes
     }
 
+    /// The same neutral patch as 16-bit integers (single-frame saves), 65535 = saturation.
+    func integerImage(level: Float) -> LinearImage {
+        let m = image(level: level)
+        let ints = m.pixels.map { UInt16(min(max(Float($0) * 65535, 0), 65535).rounded()) }
+        var l = m.linear
+        l.samples = .integer(ints)
+        return l
+    }
+
+    func testCoreImageReadsIntegerDNG() throws {
+        let dng = url("int")
+        try DNGWriter.write(integerImage(level: 0.18), to: dng, baselineExposure: 0, preview: nil)
+        let (left, right) = try render(dng)
+        XCTAssertEqual(left.x, left.y, accuracy: 6)
+        XCTAssertEqual(left.z, left.y, accuracy: 6)
+        XCTAssertGreaterThan(left.y, 80)
+        XCTAssertLessThan(right.y, left.y - 30)
+    }
+
+    /// Core Image doesn't decode Deflate in DNGs (float or integer), but does decode lossless
+    /// JPEG: single saves rely on it to stay near half size.
+    func testCompressionCoreImageReads() throws {
+        let plain = url("int-plain"), deflate = url("int-deflate"), ljpeg = url("int-ljpeg")
+        let image = integerImage(level: 0.18)
+        try DNGWriter.write(image, to: plain, baselineExposure: 0, preview: nil)
+        try DNGWriter.write(image, to: deflate, baselineExposure: 0, preview: nil, compression: .deflate)
+        try DNGWriter.write(image, to: ljpeg, baselineExposure: 0, preview: nil, compression: .losslessJPEG)
+        let a = try render(plain), c = try render(ljpeg)
+        XCTAssertEqual(a.left.y, c.left.y, accuracy: 0.5)
+        XCTAssertEqual(a.right.y, c.right.y, accuracy: 0.5)
+        let size = { (u: URL) in (try? FileManager.default.attributesOfItem(atPath: u.path)[.size] as? Int) ?? 0 }
+        XCTAssertLessThan(size(ljpeg), size(plain) / 4) // flat patches compress very well
+        // If this starts failing, Core Image learned Deflate: worth switching merges to it.
+        XCTAssertLessThan(CIRAWFilter(imageURL: deflate)?.outputImage?.extent.width ?? 0, 100)
+    }
+
     /// TIFF needs a zlib stream (header + Adler-32), not raw DEFLATE.
     func testZlibStreamHeader() throws {
         let data = try XCTUnwrap(DNGWriter.zlib([UInt8](repeating: 7, count: 1000)))
