@@ -75,7 +75,7 @@ private struct SpikeContent: View {
         } header: {
             Text("1. Connect")
         } footer: {
-            Text("X-T1: set USB mode to the card-reader/PTP option (not USB RAW CONV), connect with a USB-C cable, turn the camera on.")
+            Text("X-T1: set USB mode to MTP(PTP) (not PC SHOOT), connect with a USB-C cable, turn the camera on.")
         }
     }
 

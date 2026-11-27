@@ -36,8 +36,8 @@ cd Packages/FujiDropKit && swift test
 
 ## Running the spike
 
-1. On the X-T1: **Set-up › Connection setting › PC connection mode** (wording varies by firmware)
-   → choose the card-reader / USB mode, **not** USB RAW CONV./BACKUP RESTORE.
+1. On the X-T1: set the USB mode to **MTP(PTP)**
+   (not PC SHOOT AUTO/FIXED, which are for tethered shooting).
    Set image quality to **FINE+RAW** and take a few shots, including a short burst.
 2. Build the **FujiDropSpike** scheme to your iPhone (camera access doesn't work in the Simulator).
 3. Plug the camera in with a USB-C cable, turn it on, tap **Connect to camera**, and allow access.

@@ -71,7 +71,7 @@ final class SpikeModel: ObservableObject {
         case .failed(let reason):
             set(1, .fail, reason)
         case .searching:
-            set(1, .running, "Searching… is the camera on and in USB card-reader/PTP mode?")
+            set(1, .running, "Searching… is the camera on and in MTP(PTP) USB mode?")
         case .opening(let name), .loadingCatalog(let name):
             set(1, .running, "\(name): opening session / loading catalog…")
         case .idle, .waitingForAuthorization:
