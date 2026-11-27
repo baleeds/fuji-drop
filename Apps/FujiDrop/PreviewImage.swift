@@ -20,9 +20,9 @@ final class PreviewImageLoader: @unchecked Sendable {
     func load(url: URL, maxPixelSize: Int) async -> UIImage? {
         let key = "\(url.lastPathComponent)@\(maxPixelSize)" as NSString
         if let hit = cache.object(forKey: key) { return hit }
-        let image = await Task.detached(priority: .userInitiated) {
+        let image = await Background.decode {
             ImageLoading.thumbnail(at: url, maxPixelSize: maxPixelSize).map { UIImage(cgImage: $0) }
-        }.value
+        }
         if let image {
             cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4))
         }

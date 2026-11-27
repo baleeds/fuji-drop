@@ -196,15 +196,27 @@ final class ImportModel: ObservableObject {
                 url = try cache.store(preview.jpeg, name: id, size: size)
             }
             shots[id]?.previewURL = url
-            // Decode + Vision off the main actor; don't wait for it before reading the next preview.
+            // Thumbnail first so photos appear quickly, then the Vision print (serial, slower).
+            // Neither blocks reading the next preview.
+            let logDetail = decodeLogCount < 3
+            decodeLogCount += 1
             Task { [weak self] in
-                let (thumb, print) = await Task.detached(priority: .userInitiated) { () -> (CGImage?, FeaturePrint?) in
-                    let thumb = ImageLoading.thumbnail(at: url, maxPixelSize: 360)
-                    let small = ImageLoading.thumbnail(at: url, maxPixelSize: 512)
-                    let print = small.flatMap { try? FeaturePrinter.featurePrint(of: $0) }
-                    return (thumb, print)
-                }.value
-                self?.finish(id, thumbnail: thumb, print: print)
+                let t0 = Date()
+                let thumb = await Background.decode { ImageLoading.thumbnail(at: url, maxPixelSize: 360) }
+                if logDetail {
+                    self?.camera.record(String(format: "Decode %@: %@ in %.2f s", id, thumb == nil ? "failed" : "ok", Date().timeIntervalSince(t0)))
+                }
+                self?.finishThumbnail(id, thumb)
+                guard thumb != nil else { return }
+                let t1 = Date()
+                let print = await Background.vision { () -> FeaturePrint? in
+                    guard let small = ImageLoading.thumbnail(at: url, maxPixelSize: 512) else { return nil }
+                    return try? FeaturePrinter.featurePrint(of: small)
+                }
+                if logDetail {
+                    self?.camera.record(String(format: "Vision %@: %@ in %.2f s", id, print == nil ? "failed" : "ok", Date().timeIntervalSince(t1)))
+                }
+                self?.finishPrint(id, print)
             }
         } catch {
             shots[id]?.error = error.localizedDescription
@@ -212,13 +224,20 @@ final class ImportModel: ObservableObject {
         }
     }
 
-    private func finish(_ id: String, thumbnail: CGImage?, print: FeaturePrint?) {
-        shots[id]?.thumbnail = thumbnail.map { UIImage(cgImage: $0) }
-        shots[id]?.print = print
-        if thumbnail == nil {
+    private var decodeLogCount = 0
+
+    private func finishThumbnail(_ id: String, _ thumbnail: CGImage?) {
+        if let thumbnail {
+            shots[id]?.thumbnail = UIImage(cgImage: thumbnail)
+        } else {
             shots[id]?.error = "Could not decode preview"
             camera.record("Preview \(id): could not decode \(shots[id]?.previewURL?.lastPathComponent ?? "?")")
         }
+        if order.contains(id) { regroup() }
+    }
+
+    private func finishPrint(_ id: String, _ print: FeaturePrint?) {
+        shots[id]?.print = print
         if order.contains(id) { regroup() }
     }
 
