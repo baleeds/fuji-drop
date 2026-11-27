@@ -86,6 +86,32 @@ struct PhotoLabel: View {
     }
 }
 
+/// Marks a frame the owner picked.
+struct PickedBadge: View {
+    var body: some View {
+        Image(systemName: "checkmark")
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.white)
+            .padding(7)
+            .background(.blue, in: Circle())
+            .padding(10)
+            .accessibilityLabel("Picked")
+    }
+}
+
+/// Marks the suggested frame of a moment (until the owner picks one).
+struct SuggestedBadge: View {
+    var body: some View {
+        Image(systemName: "star.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.yellow)
+            .padding(7)
+            .background(.black.opacity(0.45), in: Circle())
+            .padding(10)
+            .accessibilityLabel("Suggested pick")
+    }
+}
+
 // MARK: - Days
 
 private struct DaysFeed: View {
@@ -211,6 +237,9 @@ private struct MomentTile: View {
             .frame(maxWidth: .infinity)
             .overlay(alignment: .bottomLeading) {
                 PhotoLabel(title: time, count: ids.count)
+            }
+            .overlay(alignment: .topTrailing) {
+                if model.picked(in: ids) != nil { PickedBadge() }
             }
             .contentShape(Rectangle())
     }

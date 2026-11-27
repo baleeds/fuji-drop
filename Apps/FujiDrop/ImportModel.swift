@@ -50,6 +50,11 @@ final class ImportModel: ObservableObject {
     @Published private(set) var moments: [[String]] = []
     @Published private(set) var cacheUsage = PreviewCache.Usage(files: 0, bytes: 0)
     @Published private(set) var skippedNonRAW = 0
+    /// Picked frames, keyed by file name and size so they survive reconnecting (and don't
+    /// carry over to a different file that reuses a DSCF number).
+    @Published private(set) var picks: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: ImportModel.picksKey) ?? [])
+    private static let picksKey = "picks"
     @Published var grouper = MomentGrouper() {
         didSet { if grouper != oldValue { regroup() } }
     }
@@ -327,10 +332,46 @@ final class ImportModel: ObservableObject {
         return ids[i]
     }
 
-    /// The frame that stands for a moment: the suggested pick, or the middle frame until all
-    /// frames are scored (so the feed doesn't flicker through partial results).
+    /// The frame that stands for a moment: the owner's pick, else the suggestion, else the
+    /// middle frame until all frames are scored (so the feed doesn't flicker).
     func hero(of ids: [String]) -> String {
-        suggested(in: ids) ?? ids[ids.count / 2]
+        picked(in: ids) ?? suggested(in: ids) ?? ids[ids.count / 2]
+    }
+
+    // MARK: Picks
+
+    private func pickKey(_ id: String) -> String? {
+        shots[id].map { "\(id)-\($0.raw.fileSize)" }
+    }
+
+    func isPicked(_ id: String) -> Bool {
+        pickKey(id).map(picks.contains) ?? false
+    }
+
+    /// The moment's picked frame, if the owner chose one.
+    func picked(in ids: [String]) -> String? {
+        ids.first(where: isPicked)
+    }
+
+    /// Makes `id` the moment's one pick (nil clears it).
+    func setPick(_ id: String?, in ids: [String]) {
+        for other in ids { if let key = pickKey(other) { picks.remove(key) } }
+        if let id, let key = pickKey(id) { picks.insert(key) }
+        UserDefaults.standard.set(Array(picks), forKey: Self.picksKey)
+    }
+
+    /// The two frames compare opens with: the current favourite on top (pick, else suggestion,
+    /// else middle) and the best-ranked other frame (else the next frame in time) below.
+    func compareStart(in ids: [String]) -> (top: String, bottom: String) {
+        let top = hero(of: ids)
+        let others = ids.filter { $0 != top }
+        guard !others.isEmpty else { return (top, top) }
+        if let ranking = ranking(of: ids),
+           let best = others.max(by: { (ranking[$0]?.total ?? 0) < (ranking[$1]?.total ?? 0) }) {
+            return (top, best)
+        }
+        let i = ids.firstIndex(of: top) ?? 0
+        return (top, i + 1 < ids.count ? ids[i + 1] : ids[i - 1])
     }
 
     /// Time gap and visual distance from the previous frame in time order, for calibration.

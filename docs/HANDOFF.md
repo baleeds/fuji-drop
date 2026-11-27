@@ -71,8 +71,12 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
    suggested pick once all frames are scored; the detail view stars it. Turn on "Show grouping
    details" to see each part of the score, and calibrate the weights on real bursts. Scores
    aren't cached on disk yet (recomputed each connect, ~0.1–0.3 s per shot expected).
-2. Compare screen: synced zoom across candidates; for close calls, download the top 2–3 RAFs
-   (~1.4 s each) and compare true 100% crops.
+2. ~~Compare screen~~ (built Nov 27, 2026, **not yet checked on device**): Compare in a moment's
+   detail view (toolbar, or long-press a frame) opens two frames with zoom/pan locked together
+   (`ZoomGroup` in `Zoomable.swift`). Winner stays: top/left is the favourite, bottom/right the
+   challenger; tap the filmstrip to challenge, "Pick this" swaps, "Pick" saves. Picks persist in
+   UserDefaults keyed by file name + size, one per moment; long-press a frame to pick/unpick.
+   Still to do: for close calls, download the 2 RAFs (~1.4 s each) for true 100 % crops.
 3. Save picks: `RAWRenderer` full-size JPEG + RAF via `PhotoSaver` (RAW as editing base), with
    location borrowed from nearby iPhone photos (camera clock can't be synced, so estimate offset).
 4. Share: hand off to Instagram via the share sheet.
