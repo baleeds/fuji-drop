@@ -1,14 +1,20 @@
 # X-T1 spike findings
 
-Tested Nov 27, 2026 on an iPhone 16 with a Fujifilm X-T1 (USB mode **MTP(PTP)**, USB-C to micro-USB cable),
+Tested Nov 26–27, 2026 on an iPhone 16 (iOS 27.2.1) with a Fujifilm X-T1 (USB mode **MTP(PTP)**, USB-C to micro-USB cable),
 using the FujiDropSpike app. Answers the four "risks to test first" in [leverage-research.md](leverage-research.md).
 
 | # | Question | Result |
 | --- | --- | --- |
-| 1 | ImageCaptureCore sees the X-T1 and lists its files | **Yes.** Contents access granted. First catalog load was slow; a second connection was fast (cause not yet known). |
-| 2 | Previews over the cable are big enough to judge sharpness | **Thumbnails: no** (160×120, the EXIF thumbnail). In-camera JPEG download works but only exists when shooting FINE+RAW. **RAF embedded preview via partial reads: 1920×1280, quick.** Fine for grouping, eyes and gross blur; subtle focus differences are hard to see by eye (about 2.5× downscale from 4896×3264). |
+| 1 | ImageCaptureCore sees the X-T1 and lists its files | **Yes.** Contents access granted. 941-file card catalogued in under 1 s on a later connection; the first-ever connection was slow (likely first-time setup). |
+| 2 | Previews over the cable are big enough to judge sharpness | **Thumbnails: no** (160×120, the EXIF thumbnail). In-camera JPEG download works but only exists when shooting FINE+RAW. **RAF embedded preview via partial reads: 1920×1280, avg 682 KB in 107 ms (~560 shots/min)** vs 31–32 MB for the whole RAF. Fine for grouping, eyes and gross blur; subtle focus differences are hard to see by eye (about 2.5× downscale from 4896×3264). |
 | 3 | RAF + JPEG save to Photos as one paired asset | **Yes.** Shows as a single RAW+JPEG item in Photos. |
-| 4 | Camera clock over PTP | **No.** iOS denies control authorization without ever prompting (reset → NotDetermined, re-request → Denied). PTP commands get no answer at all. |
+| 4 | Camera clock over PTP | **No.** iOS denies control authorization without ever prompting (reset → NotDetermined, re-request → Denied). PTP commands get no answer at all (GetDeviceInfo timed out after 15 s), even though the camera reports `ICCameraDeviceCanAcceptPTPCommands`. |
+
+Camera capabilities reported: `ICCameraDeviceSupportsHEIF`, `ICCameraDeviceCanDeleteOneFile`,
+`ICCameraDeviceCanAcceptPTPCommands`.
+
+**Still to measure:** full RAF download time over the cable (sets the cost of full-size close-call
+comparison), and on-phone JPEG render time for RAW-only shots.
 
 ## Implications
 
