@@ -38,6 +38,9 @@ final class ImportModel: ObservableObject {
     @Published private(set) var order: [String] = []
     @Published private(set) var moments: [[String]] = []
     @Published private(set) var previewsLoaded = 0
+    /// When preview reading for the selected day started, and how many were already done then.
+    private var previewStart: (date: Date, alreadyLoaded: Int)?
+    @Published private(set) var cacheUsage = PreviewCache.Usage(files: 0, bytes: 0)
     @Published private(set) var skippedNonRAW = 0
     @Published var grouper = MomentGrouper() {
         didSet { if grouper != oldValue { regroup() } }
@@ -47,6 +50,10 @@ final class ImportModel: ObservableObject {
     private var distanceCache: [String: Float] = [:]
 
     // MARK: Catalog → days
+
+    init() {
+        pruneCache()
+    }
 
     func catalogReady() {
         let pairs = camera.shots
@@ -81,7 +88,8 @@ final class ImportModel: ObservableObject {
         loadTask?.cancel()
         selectedDayID = dayID
         order = day.shotIDs
-        previewsLoaded = order.filter { shots[$0]?.thumbnail != nil }.count
+        previewsLoaded = order.filter { shots[$0]?.thumbnail != nil || shots[$0]?.error != nil }.count
+        previewStart = (Date(), previewsLoaded)
         regroup()
         let ids = order
         loadTask = Task { [weak self] in
@@ -126,7 +134,44 @@ final class ImportModel: ObservableObject {
         shots[id]?.print = print
         if thumbnail == nil { shots[id]?.error = "Could not decode preview" }
         previewsLoaded += 1
+        if previewsLoaded == order.count { refreshCacheUsage() }
         regroup()
+    }
+
+    /// Rough time left for the selected day's previews, once there's enough to estimate from.
+    var previewTimeRemaining: TimeInterval? {
+        guard let start = previewStart else { return nil }
+        let done = previewsLoaded - start.alreadyLoaded
+        let left = order.count - previewsLoaded
+        guard done >= 5, left > 0 else { return nil }
+        return Date().timeIntervalSince(start.date) / Double(done) * Double(left)
+    }
+
+    // MARK: Preview cache
+
+    /// Trims the cache (30 days unused, 500 MB cap) off the main actor, then refreshes usage.
+    func pruneCache() {
+        let cache = self.cache
+        Task {
+            let result = await Task.detached(priority: .utility) { cache.prune() }.value
+            if result.removed.files > 0 {
+                camera.record("Preview cache: removed \(result.removed.files) old previews (\(result.removed.bytes / 1_000_000) MB).")
+            }
+            cacheUsage = result.remaining
+        }
+    }
+
+    func clearCache() {
+        let cache = self.cache
+        Task {
+            _ = await Task.detached(priority: .utility) { cache.clear() }.value
+            cacheUsage = await Task.detached { cache.usage() }.value
+        }
+    }
+
+    private func refreshCacheUsage() {
+        let cache = self.cache
+        Task { cacheUsage = await Task.detached(priority: .utility) { cache.usage() }.value }
     }
 
     // MARK: Moments

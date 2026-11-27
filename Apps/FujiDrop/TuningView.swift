@@ -4,6 +4,9 @@ import SwiftUI
 /// Live controls for the moment-grouping thresholds. Changes regroup immediately.
 struct TuningView: View {
     @Binding var grouper: MomentGrouper
+    let cacheUsage: PreviewCache.Usage
+    let clearCache: () -> Void
+    @State private var confirmClear = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -29,8 +32,23 @@ struct TuningView: View {
                     Button("Reset to defaults") { grouper = MomentGrouper() }
                     LabeledContent("Current", value: summary).font(.caption.monospaced())
                 }
+                Section {
+                    LabeledContent("Saved previews",
+                                   value: "\(cacheUsage.files) · \(ByteCountFormatter.string(fromByteCount: cacheUsage.bytes, countStyle: .file))")
+                    Button("Clear saved previews", role: .destructive) { confirmClear = true }
+                        .disabled(cacheUsage.files == 0)
+                } header: {
+                    Text("Storage")
+                } footer: {
+                    Text("Previews are kept so reconnecting is instant. Ones unused for 30 days are removed automatically, and the total is capped at 500 MB. iOS may also clear them when storage is low.")
+                }
             }
-            .navigationTitle("Grouping")
+            .confirmationDialog("Clear saved previews?", isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("Clear", role: .destructive, action: clearCache)
+            } message: {
+                Text("They'll be read from the camera again next time.")
+            }
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { dismiss() } }
         }

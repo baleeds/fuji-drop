@@ -48,7 +48,7 @@ private struct ImportContent: View {
             if camera.catalogComplete { model.catalogReady() }
         }
         .sheet(isPresented: $showTuning) {
-            TuningView(grouper: $model.grouper)
+            TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, clearCache: model.clearCache)
                 .presentationDetents([.medium, .large])
         }
         .navigationDestination(for: MomentRef.self) { ref in
@@ -71,6 +71,10 @@ private struct ImportContent: View {
                     ProgressView(value: Double(model.previewsLoaded), total: Double(max(model.order.count, 1))) {
                         Text("Reading previews \(model.previewsLoaded) of \(model.order.count)")
                             .font(.subheadline)
+                    } currentValueLabel: {
+                        if let left = model.previewTimeRemaining {
+                            Text(left < 60 ? "About \(Int(left.rounded())) s left" : "About \(Int((left / 60).rounded())) min left")
+                        }
                     }
                 }
             } footer: {
@@ -103,11 +107,31 @@ private struct ConnectView: View {
                 Button("Try again", action: connect).buttonStyle(.bordered)
             } else {
                 ProgressView()
+                if case .loadingCatalog = camera.phase {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text(catalogProgress)
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             Text("X-T1: USB mode MTP(PTP), connect with a USB-C to micro-USB data cable, turn the camera on.")
                 .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .padding(32)
+        .onChange(of: camera.phase) {
+            if case .loadingCatalog = camera.phase, catalogStart == nil { catalogStart = Date() }
+            if camera.phase == .idle { catalogStart = nil }
+        }
+    }
+
+    @State private var catalogStart: Date?
+
+    /// "412 files · 6 s": a running count, since iOS can't tell us the total up front.
+    private var catalogProgress: String {
+        let elapsed = catalogStart.map { Int(Date().timeIntervalSince($0)) } ?? 0
+        let files = camera.files.count == 1 ? "1 file" : "\(camera.files.count) files"
+        return "\(files) found · \(elapsed) s"
     }
 
     private var status: String {

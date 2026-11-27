@@ -18,15 +18,70 @@ final class DayGroupingTests: XCTestCase {
 }
 
 final class PreviewCacheTests: XCTestCase {
-    func testStoreAndLookup() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let cache = PreviewCache(directory: dir)
+    private var dir: URL!
+    private var cache: PreviewCache!
 
+    override func setUp() {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        cache = PreviewCache(directory: dir)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Stores a file of `bytes` bytes last used `daysAgo` days before `now`.
+    @discardableResult
+    private func put(_ name: String, bytes: Int, daysAgo: Double, now: Date) throws -> URL {
+        let url = try cache.store(Data(count: bytes), name: name, size: Int64(bytes))
+        try FileManager.default.setAttributes(
+            [.modificationDate: now.addingTimeInterval(-daysAgo * 86400)], ofItemAtPath: url.path)
+        return url
+    }
+
+    func testStoreAndLookup() throws {
         XCTAssertNil(cache.cachedURL(name: "DSCF0001", size: 100))
         let url = try cache.store(Data([1, 2, 3]), name: "DSCF0001", size: 100)
         XCTAssertEqual(cache.cachedURL(name: "DSCF0001", size: 100), url)
         XCTAssertEqual(try Data(contentsOf: url), Data([1, 2, 3]))
         XCTAssertNil(cache.cachedURL(name: "DSCF0001", size: 101), "different size is a different file")
+    }
+
+    func testPruneRemovesStaleThenLeastRecentlyUsed() throws {
+        let now = Date()
+        try put("old", bytes: 100, daysAgo: 40, now: now)
+        try put("a", bytes: 100, daysAgo: 3, now: now)
+        try put("b", bytes: 100, daysAgo: 2, now: now)
+        try put("c", bytes: 100, daysAgo: 1, now: now)
+
+        let result = cache.prune(maxBytes: 250, maxAge: 30 * 86400, now: now)
+
+        XCTAssertEqual(result.removed, .init(files: 2, bytes: 200)) // "old" by age, "a" by size
+        XCTAssertEqual(result.remaining, .init(files: 2, bytes: 200))
+        XCTAssertNil(cache.cachedURL(name: "old", size: 100))
+        XCTAssertNil(cache.cachedURL(name: "a", size: 100))
+        XCTAssertNotNil(cache.cachedURL(name: "b", size: 100))
+        XCTAssertNotNil(cache.cachedURL(name: "c", size: 100))
+    }
+
+    func testCacheHitProtectsEntryFromEviction() throws {
+        let now = Date()
+        try put("a", bytes: 100, daysAgo: 3, now: now)
+        try put("b", bytes: 100, daysAgo: 2, now: now)
+        _ = cache.cachedURL(name: "a", size: 100, now: now) // "a" is now the most recent
+
+        cache.prune(maxBytes: 150, maxAge: 30 * 86400, now: now)
+
+        XCTAssertNotNil(cache.cachedURL(name: "a", size: 100))
+        XCTAssertNil(cache.cachedURL(name: "b", size: 100))
+    }
+
+    func testClearAndUsage() throws {
+        let now = Date()
+        try put("a", bytes: 100, daysAgo: 0, now: now)
+        try put("b", bytes: 50, daysAgo: 0, now: now)
+        XCTAssertEqual(cache.usage(), .init(files: 2, bytes: 150))
+        XCTAssertEqual(cache.clear(), .init(files: 2, bytes: 150))
+        XCTAssertEqual(cache.usage(), .init(files: 0, bytes: 0))
     }
 }
