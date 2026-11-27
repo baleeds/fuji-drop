@@ -13,3 +13,4 @@ Packages/FujiDropKit/Package.resolved
 Config/Local.xcconfig
 
 .DS_Store
+build/

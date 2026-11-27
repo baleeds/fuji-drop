@@ -42,17 +42,13 @@ The app's log mirrors to the console under subsystem `FujiDrop`, and to Settings
 - `Apps/Spike`: the X-T1 spike app used to answer the risk questions. Keep for reference.
 - `.github/workflows/build.yml`: CI on GitHub's macOS runners (Xcode 26.6 / iOS 26.5 SDK only).
 
-## Open bug (top priority)
+## Fixed: grey collages and moment photos
 
-**Day collages and moment photos stay grey.** Log shows the preview queue runs and finds
-previews in the disk cache instantly ("done in 0.00 s"), but thumbnails never appear: no
-decode-failure log, no ⚠︎ in the UI, progress stays at "0 of N". This started with the
-preview-queue / photo-first changes; the earlier picker-based build loaded fine.
-
-Hypothesis: blocking ImageIO + Vision work in `Task.detached` starved Swift's cooperative
-thread pool. Commit `10780b0` moves it to GCD queues (`Apps/FujiDrop/Background.swift`), sets
-thumbnails before Vision runs, and logs `Decode …` / `Vision …` timings. **Untested on device.**
-Verify it; if still grey, the new log lines show which step stalls.
+Day collages and moment photos stayed grey: the preview queue found cached previews instantly but
+thumbnails never appeared. Cause: blocking ImageIO + Vision work in `Task.detached` starved Swift's
+cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop/Background.swift`).
+**Verified on device Nov 26, 2026:** cached previews decode in 0.03–0.04 s, Vision prints in
+0.2–0.3 s, and collages fill in. Keep blocking work off the cooperative pool (use `Background`).
 
 ## Gotchas learned the hard way
 
