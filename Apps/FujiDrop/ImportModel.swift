@@ -106,6 +106,12 @@ final class ImportModel: ObservableObject {
     @Published private(set) var picks: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: ImportModel.picksKey) ?? [])
     private static let picksKey = "picks.v2"
+    /// Picks saved to Photos: `Shot.key` → Photos asset id. Kept so nothing saves twice.
+    @Published private(set) var saved: [String: String] =
+        (UserDefaults.standard.dictionary(forKey: ImportModel.savedKey) as? [String: String]) ?? [:]
+    private static let savedKey = "saved.v1"
+    /// Saves picks to Photos in the background (see `SaveQueue`).
+    lazy var saves = SaveQueue(model: self)
     @Published var grouper = MomentGrouper() {
         didSet { if grouper != oldValue { regroup() } }
     }
@@ -208,6 +214,7 @@ final class ImportModel: ObservableObject {
     }
 
     private func clearSession() {
+        saves.reset()
         stopCameraWork()
         clearRawCache()
         cameraID = nil
@@ -580,6 +587,20 @@ final class ImportModel: ObservableObject {
         for other in ids { if let key = shots[other]?.key { picks.remove(key) } }
         if let id, let key = shots[id]?.key { picks.insert(key) }
         UserDefaults.standard.set(Array(picks), forKey: Self.picksKey)
+    }
+
+    func isSaved(_ id: String) -> Bool {
+        shots[id].map { saved[$0.key] != nil } ?? false
+    }
+
+    func markSaved(key: String, assetID: String) {
+        saved[key] = assetID
+        UserDefaults.standard.set(saved, forKey: Self.savedKey)
+    }
+
+    /// Picked frames among `ids` not yet in Photos, in time order.
+    func unsavedPicks(in ids: [String]) -> [String] {
+        ids.filter { isPicked($0) && !isSaved($0) }
     }
 
     /// The two frames compare opens with: the current favourite on top (pick, else suggestion,

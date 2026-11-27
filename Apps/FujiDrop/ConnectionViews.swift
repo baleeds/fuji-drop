@@ -5,6 +5,7 @@ import SwiftUI
 /// as it was; reconnecting the same camera removes the overlay and resumes.
 struct ReconnectOverlay: View {
     @ObservedObject var camera: CameraSession
+    @ObservedObject var saves: SaveQueue
     let startOver: () -> Void
 
     var body: some View {
@@ -19,6 +20,10 @@ struct ReconnectOverlay: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                if let p = saves.progress, p.state == .running {
+                    Label("Saving paused at \(min(p.done + 1, p.total)) of \(p.total)", systemImage: "pause.circle")
+                        .font(.footnote.weight(.semibold))
+                }
                 if case .failed = camera.phase {
                     Button("Try again") {
                         Task {
@@ -85,7 +90,7 @@ private struct ReconnectOverlayModifier: ViewModifier {
     func body(content: Content) -> some View {
         content.overlay {
             if model.connection == .reconnecting {
-                ReconnectOverlay(camera: model.camera, startOver: model.endSession)
+                ReconnectOverlay(camera: model.camera, saves: model.saves, startOver: model.endSession)
                     .transition(.opacity)
             }
         }

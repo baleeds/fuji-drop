@@ -99,6 +99,11 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
    swaps the preview for the full image with the same viewport and shows a "RAW" badge.
    The preview queue pauses while a RAF downloads. Compare allows 8× zoom (100 % ≈ 4.2×
    stacked, ≈ 5.5× side by side). Saving a pick should reuse `rawURL` (cached after compare).
-3. Save picks: `RAWRenderer` full-size JPEG + RAF via `PhotoSaver` (RAW as editing base), with
-   location borrowed from nearby iPhone photos (camera clock can't be synced, so estimate offset).
+3. ~~Save picks~~ (built Nov 27, 2026, **not yet checked on device**): `SaveQueue` saves picks one
+   at a time in the background (RAF via `ImportModel.rawURL`, full-size JPEG via
+   `RAWRenderer.renderJPEG`, pair via `PhotoSaver` with the RAF as editing base and clean
+   DSCF names). Start from a day's toolbar ("Save N") or a pick's long-press menu. `SaveBar`
+   sits under the whole navigation stack; unplugging pauses (the reconnect overlay says so).
+   Saved picks are remembered by `Shot.key` (`saved.v1`) and shown with a green check.
+   Still to do: location borrowed from nearby iPhone photos (estimate the camera clock offset).
 4. Share: hand off to Instagram via the share sheet.

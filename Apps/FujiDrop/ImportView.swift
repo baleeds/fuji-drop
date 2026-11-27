@@ -9,6 +9,10 @@ struct ImportView: View {
         NavigationStack(path: $path) {
             ImportContent(model: model, camera: model.camera)
         }
+        // Below every screen in the stack, so saving stays visible while you browse.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            SaveBar(saves: model.saves, model: model)
+        }
         .reconnectOverlay(model)
         // Session ended or a different camera: nothing pushed belongs to it any more.
         .onChange(of: model.cameraID) { path = NavigationPath() }
@@ -94,16 +98,18 @@ extension View {
     }
 }
 
-/// Marks a frame the owner picked.
+/// Marks a frame the owner picked: blue, or green once it's saved to Photos.
 struct PickedBadge: View {
+    var saved = false
+
     var body: some View {
         Image(systemName: "checkmark")
             .font(.caption.weight(.bold))
             .foregroundStyle(.white)
             .padding(7)
-            .background(.blue, in: Circle())
+            .background(saved ? .green : .blue, in: Circle())
             .padding(10)
-            .accessibilityLabel("Picked")
+            .accessibilityLabel(saved ? "Picked, saved to Photos" : "Picked")
     }
 }
 
@@ -229,7 +235,17 @@ private struct MomentsFeed: View {
         }
         .navigationTitle(model.days.first { $0.id == dayID }?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { SettingsButton(showSettings: $showSettings) }
+        .toolbar {
+            let unsaved = model.unsavedPicks(in: model.order)
+            if !unsaved.isEmpty {
+                Button { model.saves.save(unsaved) } label: {
+                    Label("Save \(unsaved.count)", systemImage: "square.and.arrow.down")
+                        .labelStyle(.titleAndIcon)
+                }
+                .accessibilityLabel("Save \(unsaved.count) picks to Photos")
+            }
+            SettingsButton(showSettings: $showSettings)
+        }
         .onAppear { if model.selectedDayID != dayID { model.select(dayID: dayID) } }
     }
 
@@ -266,7 +282,7 @@ private struct MomentTile: View {
                 PhotoLabel(title: model.timeLabel(of: ids), count: ids.count)
             }
             .overlay(alignment: .topTrailing) {
-                if model.picked(in: ids) != nil { PickedBadge() }
+                if let pick = model.picked(in: ids) { PickedBadge(saved: model.isSaved(pick)) }
             }
             .contentShape(Rectangle())
     }

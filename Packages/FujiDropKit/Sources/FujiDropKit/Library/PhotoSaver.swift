@@ -32,10 +32,12 @@ public enum PhotoSaver {
     }
 
     /// Saves the pair. RAW must be a file URL (in-memory data is unreliable for pairing).
-    /// Returns the new asset's local identifier.
+    /// `filename` (e.g. "DSCF1234") names both resources in Photos when the files on disk
+    /// have cache names. Returns the new asset's local identifier.
     public static func savePair(
         jpeg: URL,
         raw: URL?,
+        filename: String? = nil,
         creationDate: Date? = nil,
         location: CLLocation? = nil,
         rawIsEditingBase: Bool = true
@@ -50,13 +52,13 @@ public enum PhotoSaver {
             let request = PHAssetCreationRequest.forAsset()
 
             let jpegOptions = PHAssetResourceCreationOptions()
-            jpegOptions.originalFilename = jpeg.lastPathComponent
+            jpegOptions.originalFilename = filename.map { "\($0).\(jpeg.pathExtension)" } ?? jpeg.lastPathComponent
             jpegOptions.uniformTypeIdentifier = UTType.jpeg.identifier
             request.addResource(with: .photo, fileURL: jpeg, options: jpegOptions)
 
             if let raw {
                 let rawOptions = PHAssetResourceCreationOptions()
-                rawOptions.originalFilename = raw.lastPathComponent
+                rawOptions.originalFilename = filename.map { "\($0).\(raw.pathExtension)" } ?? raw.lastPathComponent
                 rawOptions.uniformTypeIdentifier =
                     UTType(filenameExtension: raw.pathExtension)?.identifier ?? "com.fuji.raw-image"
                 request.addResource(with: .alternatePhoto, fileURL: raw, options: rawOptions)

@@ -31,7 +31,11 @@ struct MomentDetailView: View {
                             FlawTip(flaws: ranking?.breakdowns[id]?.flaws ?? [])
                         }
                         .overlay(alignment: .topTrailing) {
-                            if id == picked { PickedBadge() } else if id == suggested { SuggestedBadge() }
+                            if id == picked {
+                                PickedBadge(saved: model.isSaved(id))
+                            } else if id == suggested {
+                                SuggestedBadge()
+                            }
                         }
                         .overlay(alignment: .bottomLeading) {
                             if showDetails {
@@ -45,6 +49,11 @@ struct MomentDetailView: View {
                         .onTapGesture { viewing = id }
                         .contextMenu {
                             if id == picked {
+                                if !model.isSaved(id) {
+                                    Button("Save to Photos", systemImage: "square.and.arrow.down") {
+                                        model.saves.save([id])
+                                    }
+                                }
                                 Button("Remove Pick", systemImage: "xmark") { model.setPick(nil, in: ids) }
                             } else {
                                 Button("Pick", systemImage: "checkmark") { model.setPick(id, in: ids) }
