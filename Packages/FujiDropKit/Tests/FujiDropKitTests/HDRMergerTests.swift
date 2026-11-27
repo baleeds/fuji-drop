@@ -1,4 +1,5 @@
 @testable import FujiDropKit
+import simd
 import XCTest
 
 /// Synthetic brackets: one linear scene, captured at several exposures with clipping, should
@@ -118,6 +119,37 @@ final class HDRMergerTests: XCTestCase {
         let peak = m.pixels.map(Float.init).max() ?? 0
         XCTAssertEqual(peak, 1, accuracy: 0.001)
         XCTAssertGreaterThan(m.scale, 1)
+    }
+
+    /// With the colour cleanup on, no channel ends up above 1 (the DNG's WhiteLevel): the peak
+    /// is measured after the cleanup, which can raise a single channel.
+    func testNoChannelAboveOneAfterCleanup() throws {
+        var o = options()
+        o.cleanup = true
+        var bright = frame(stops: -1)
+        // A saturated colour speck at the brightest end of the ramp.
+        let i = (60 * w + w - 3) * 3
+        bright.pixels[i] = 60000; bright.pixels[i + 1] = 2000; bright.pixels[i + 2] = 60000
+        let m = try HDRMerger.merge([frame(stops: 0), bright, frame(stops: -2)], reference: 0, options: o)
+        XCTAssertLessThanOrEqual(m.pixels.map(Float.init).max() ?? 2, 1)
+    }
+
+    /// A wild homography (Vision failing) never yields a broken crop.
+    func testCoverageSurvivesWildHomographies() {
+        let shift = simd_float3x3(rows: [SIMD3(1, 0, 3000), SIMD3(0, 1, 0), SIMD3(0, 0, 1)])
+        let degenerate = simd_float3x3(rows: [SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0.01, 0, 0)])
+        let nan = simd_float3x3(rows: [SIMD3(.nan, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)])
+        for m in [shift, degenerate, nan] {
+            let c = HDRMerger.coverage([nil, m], width: 400, height: 300)
+            XCTAssertTrue(c.x >= 0 && c.y >= 0 && c.width >= 2 && c.height >= 2)
+            XCTAssertLessThanOrEqual(c.x + c.width, 400)
+            XCTAssertLessThanOrEqual(c.y + c.height, 300)
+        }
+        let small = simd_float3x3(rows: [SIMD3(1, 0, 6), SIMD3(0, 1, -4), SIMD3(0, 0, 1)])
+        let c = HDRMerger.coverage([nil, small], width: 400, height: 300)
+        XCTAssertLessThan(c.width, 400)
+        XCTAssertGreaterThan(c.width, 380)
+        XCTAssertEqual(HDRMerger.maxShift(degenerate, width: 400, height: 300), .infinity)
     }
 
     func testRejectsMismatchedFrames() {

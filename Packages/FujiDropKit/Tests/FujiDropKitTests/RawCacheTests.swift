@@ -28,6 +28,19 @@ final class RawCacheTests: XCTestCase {
         XCTAssertNil(cache.cachedURL(name: "DSCF0001", size: 43), "a different file reusing the number")
     }
 
+    /// Clearing renames the folder away at once: a download right after gets a fresh folder,
+    /// untouched by deleting the old files.
+    func testDetachEmptiesAtOnceAndKeepsOldFilesForDeletion() throws {
+        try cache.adopt(try download("DSCF0001"), name: "DSCF0001", size: 1)
+        let old = try XCTUnwrap(cache.detach())
+        defer { try? FileManager.default.removeItem(at: old) }
+        XCTAssertNil(cache.cachedURL(name: "DSCF0001", size: 1))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: old.appendingPathComponent("DSCF0001-1/DSCF0001.RAF").path))
+        let fresh = try cache.adopt(try download("DSCF0002"), name: "DSCF0002", size: 2)
+        try FileManager.default.removeItem(at: old)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+    }
+
     func testPruneKeepsMostRecentlyUsed() throws {
         let t0 = Date(timeIntervalSince1970: 1_000_000)
         for i in 0..<4 {

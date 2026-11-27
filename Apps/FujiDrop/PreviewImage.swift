@@ -19,7 +19,8 @@ final class PreviewImageLoader: @unchecked Sendable {
     }
 
     func load(url: URL, maxPixelSize: Int) async -> UIImage? {
-        await load(key: "\(url.lastPathComponent)@\(maxPixelSize)" as NSString) {
+        // The full path: merged frames share names across merges (`DSCF2729-HDR.JPG`).
+        await load(key: "\(url.path)@\(maxPixelSize)" as NSString) {
             await Background.decode {
                 ImageLoading.thumbnail(at: url, maxPixelSize: maxPixelSize).map { UIImage(cgImage: $0) }
             }

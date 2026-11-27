@@ -561,9 +561,19 @@ final class ImportModel: ObservableObject {
         return url
     }
 
+    /// Empties the RAF cache now (a rename on this thread, so downloads that start right after
+    /// get a fresh folder) and deletes the old files in the background, along with any left
+    /// over from a session that ended before its deletion finished.
     private func clearRawCache() {
-        let cache = rawCache
-        Task.detached(priority: .utility) { cache.clear() }
+        _ = rawCache.detach()
+        let parent = rawCache.directory.deletingLastPathComponent()
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            for url in (try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? []
+            where url.lastPathComponent.hasPrefix("RAF-old-") {
+                try? fm.removeItem(at: url)
+            }
+        }
     }
 
     // MARK: Preview cache

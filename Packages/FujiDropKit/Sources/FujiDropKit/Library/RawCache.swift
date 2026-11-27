@@ -70,4 +70,14 @@ public struct RawCache: Sendable {
     public func clear() {
         try? FileManager.default.removeItem(at: directory)
     }
+
+    /// Empties the cache at once (one rename) and returns the old folder for the caller to
+    /// delete at leisure, so downloads starting right after never land in a folder that's
+    /// being deleted. Nil if there was nothing to clear.
+    public func detach() -> URL? {
+        let trash = directory.deletingLastPathComponent()
+            .appendingPathComponent("RAF-old-\(UUID().uuidString)", isDirectory: true)
+        guard (try? FileManager.default.moveItem(at: directory, to: trash)) != nil else { return nil }
+        return trash
+    }
 }
