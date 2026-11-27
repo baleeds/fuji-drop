@@ -20,9 +20,10 @@ final class RawCacheTests: XCTestCase {
         return u
     }
 
-    func testAdoptRenamesByKeyAndKeepsExtension() throws {
+    func testAdoptKeepsCameraFileNameUnderKeyFolder() throws {
         let u = try cache.adopt(try download("DSCF0001"), name: "DSCF0001", size: 42)
-        XCTAssertEqual(u.lastPathComponent, "DSCF0001-42.RAF")
+        XCTAssertEqual(u.lastPathComponent, "DSCF0001.RAF")
+        XCTAssertEqual(u.deletingLastPathComponent().lastPathComponent, "DSCF0001-42")
         XCTAssertEqual(cache.cachedURL(name: "DSCF0001", size: 42), u)
         XCTAssertNil(cache.cachedURL(name: "DSCF0001", size: 43), "a different file reusing the number")
     }

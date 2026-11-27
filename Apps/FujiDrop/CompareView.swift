@@ -38,11 +38,9 @@ struct CompareView: View {
             VStack(spacing: 0) {
                 layout {
                     ComparePane(model: model, shot: model.shots[favourite],
-                                flaws: breakdowns?[favourite]?.flaws ?? [], group: group,
-                                connection: model.connection, promote: nil)
+                                flaws: breakdowns?[favourite]?.flaws ?? [], group: group, promote: nil)
                     ComparePane(model: model, shot: model.shots[challenger],
-                                flaws: breakdowns?[challenger]?.flaws ?? [], group: group,
-                                connection: model.connection) {
+                                flaws: breakdowns?[challenger]?.flaws ?? [], group: group) {
                         let previous = favourite
                         favourite = challenger
                         challenger = previous
@@ -89,9 +87,6 @@ private struct ComparePane: View {
     let shot: ImportModel.Shot?
     let flaws: [BestShot.Flaw]
     let group: ZoomGroup
-    /// A change (reconnecting) re-runs loading, so a RAW download cut off by unplugging is
-    /// retried.
-    let connection: ImportModel.Connection
     /// Swaps this pane in as the favourite; nil for the favourite itself.
     let promote: (() -> Void)?
     @State private var image: UIImage?
@@ -129,7 +124,7 @@ private struct ComparePane: View {
             }
         }
         .overlay(alignment: .bottomLeading) { rawBadge }
-        .task(id: TaskKey(id: shot?.id, preview: shot?.previewURL, connection: connection)) {
+        .task(id: TaskKey(id: shot?.id, preview: shot?.previewURL)) {
             // Keep showing the previous frame until the new one decodes (usually from the
             // in-memory cache), so the zoomable view and its viewport carry over.
             guard let shot else { image = nil; return }
@@ -148,11 +143,10 @@ private struct ComparePane: View {
             }
             guard !Task.isCancelled else { return }
             image = preview
-            // Then the real pixels. The download continues if this pane moves on to another
-            // frame, so switching back is instant.
+            // Then the real pixels (waiting out an unplug). The download continues if this
+            // pane moves on to another frame, so switching back is instant.
             guard let raw = await model.rawURL(shot.id), !Task.isCancelled else {
-                // While unplugged this stays "loading": the reconnect re-runs this task.
-                if !Task.isCancelled, model.connection == .connected { full = .failed }
+                if !Task.isCancelled { full = .failed }
                 return
             }
             let fullImage = await PreviewImageLoader.shared.loadFullResolution(raw: raw)
@@ -169,7 +163,6 @@ private struct ComparePane: View {
     private struct TaskKey: Equatable {
         let id: String?
         let preview: URL?
-        let connection: ImportModel.Connection
     }
 
     /// Small status: loading RAW, RAW (full resolution), or RAW unavailable.

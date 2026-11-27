@@ -453,11 +453,32 @@ final class ImportModel: ObservableObject {
         return rawCache.cachedURL(name: id, size: shot.size)
     }
 
-    /// Downloads a shot's RAF (about 1.4 s for 33 MB), or returns the cached copy. Nil while
-    /// the camera is disconnected or if the download fails.
+    /// A shot's RAF: the cached copy, or a download (about 1.4 s for 33 MB). While the camera
+    /// is unplugged this waits for it to come back (a download cut off by unplugging is
+    /// retried), so callers never need to check the connection. Nil only if the download
+    /// fails, the file is no longer on the card, the session ends, or the caller is cancelled.
     func rawURL(_ id: String) async -> URL? {
-        if let cached = cachedRawURL(id) { return cached }
-        guard connection == .connected, let shot = shots[id] else { return nil }
+        guard let key = shots[id]?.key else { return nil }
+        while !Task.isCancelled {
+            guard shots[id]?.key == key else { return nil }
+            if let cached = cachedRawURL(id) { return cached }
+            switch connection {
+            case .none:
+                return nil
+            case .reconnecting:
+                for await state in $connection.values where state != .reconnecting { break }
+            case .connected:
+                if let url = await download(id) { return url }
+                // Failed while still connected: a real failure. Otherwise unplugged; loop.
+                if connection == .connected { return nil }
+            }
+        }
+        return nil
+    }
+
+    /// One RAF download, shared by concurrent callers.
+    private func download(_ id: String) async -> URL? {
+        guard let shot = shots[id] else { return nil }
         if let running = rawDownloads[id] { return await running.value }
         let cache = rawCache
         let task = Task { [weak self] () -> URL? in

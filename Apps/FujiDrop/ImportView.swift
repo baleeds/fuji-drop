@@ -9,11 +9,12 @@ struct ImportView: View {
         NavigationStack(path: $path) {
             ImportContent(model: model, camera: model.camera)
         }
-        // Below every screen in the stack, so saving stays visible while you browse.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            SaveBar(saves: model.saves, model: model)
-        }
         .reconnectOverlay(model)
+        // Below every screen in the stack (and above the reconnect overlay), so saving stays
+        // visible while you browse and says when it's waiting for the camera.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            SaveBar(saves: model.saves, waitingForCamera: model.connection == .reconnecting)
+        }
         // Session ended or a different camera: nothing pushed belongs to it any more.
         .onChange(of: model.cameraID) { path = NavigationPath() }
     }
