@@ -45,13 +45,15 @@ public enum LinearRenderer {
 
     /// Renders `width × height` pixels from `load(pixel index)`, downsampled by `factor` (box
     /// average in linear light), at `exposure` stops.
+    /// - Parameter balance: per-channel gains on linear sRGB before the tone curve (see
+    ///   `matchLook`); 1 keeps the as-shot white balance.
     public static func render(width: Int, height: Int, camXYZ: [Float], exposure: Float,
-                              curve: Curve = defaultCurve, factor: Int = 1,
+                              balance: SIMD3<Float> = .one, curve: Curve = defaultCurve, factor: Int = 1,
                               load: (Int) -> SIMD3<Float>) -> CGImage? {
         let ow = width / factor, oh = height / factor
         guard ow > 0, oh > 0 else { return nil }
         let m = cameraToSRGB(camXYZ)
-        let gain = pow(2, exposure)
+        let gain = balance * pow(2, exposure)
         let encode = sRGBTable
         // Rendered straight into the buffer the image owns (freed with it): no copy.
         let bytes = ow * oh * 4
@@ -87,17 +89,66 @@ public enum LinearRenderer {
     /// Exposure (stops) at which a render's overall brightness matches `reference` (the
     /// camera's JPEG), from small renders. Three passes, since the curve bends the estimate.
     public static func matchExposure(width: Int, height: Int, camXYZ: [Float], reference: CGImage,
-                                     curve: Curve = defaultCurve, load: (Int) -> SIMD3<Float>) -> Float {
+                                     balance: SIMD3<Float> = .one, curve: Curve = defaultCurve,
+                                     load: (Int) -> SIMD3<Float>) -> Float {
         guard let target = GrayImage(reference, maxSide: 256) else { return 0 }
         let factor = max(1, max(width, height) / 512)
         var ev: Float = 0
         for _ in 0..<3 {
-            guard let small = render(width: width, height: height, camXYZ: camXYZ, exposure: ev, curve: curve,
-                                     factor: factor, load: load),
+            guard let small = render(width: width, height: height, camXYZ: camXYZ, exposure: ev, balance: balance,
+                                     curve: curve, factor: factor, load: load),
                   let probe = GrayImage(small, maxSide: 256) else { break }
             ev += Brightness.stops(toMatch: target, from: probe)
         }
         return min(max(ev, -3), 5)
+    }
+
+    /// Exposure and colour balance at which a render looks like `reference` (the camera's
+    /// JPEG): the brightness match above, plus per-channel gains so midtones have the same
+    /// average colour. Fuji's JPEGs run warmer than a neutral render (measured b* +1 to +6
+    /// on the owner's frames, most under tungsten), so without this the photo reads bluer
+    /// than the camera showed it. Only midtone blocks count (a merge's recovered highlights
+    /// and lifted shadows legitimately differ); gains keep luminance and stay within ±25 %.
+    public static func matchLook(width: Int, height: Int, camXYZ: [Float], reference: CGImage,
+                                 load: (Int) -> SIMD3<Float>) -> (exposure: Float, balance: SIMD3<Float>) {
+        var balance = SIMD3<Float>.one
+        var ev = matchExposure(width: width, height: height, camXYZ: camXYZ, reference: reference, load: load)
+        guard let target = blockColours(reference) else { return (ev, balance) }
+        let factor = max(1, max(width, height) / 512)
+        for _ in 0..<2 {
+            guard let small = render(width: width, height: height, camXYZ: camXYZ, exposure: ev, balance: balance,
+                                     factor: factor, load: load),
+                  let ours = blockColours(small) else { break }
+            // Median per-channel ratio over blocks that are midtones in both.
+            var ratios: [[Float]] = [[], [], []]
+            for (a, b) in zip(target, ours) {
+                let la = luminance(a), lb = luminance(b)
+                guard la > 0.03, la < 0.6, lb > 0.03, lb < 0.6, b.min() > 1e-3 else { continue }
+                for c in 0..<3 { ratios[c].append(a[c] / b[c]) }
+            }
+            guard ratios[0].count >= 20 else { break }
+            var r = SIMD3<Float>(repeating: 1)
+            for c in 0..<3 { let sorted = ratios[c].sorted(); r[c] = sorted[sorted.count / 2] }
+            balance *= r / luminance(r) // keep brightness: exposure is matched separately
+            balance = balance.clamped(lowerBound: SIMD3(repeating: 0.8), upperBound: SIMD3(repeating: 1.25))
+            ev = matchExposure(width: width, height: height, camXYZ: camXYZ, reference: reference, balance: balance, load: load)
+        }
+        return (ev, balance)
+    }
+
+    @inline(__always) static func luminance(_ c: SIMD3<Float>) -> Float { 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z }
+
+    /// Average linear-sRGB colour of each block of a 24 × 16 grid.
+    static func blockColours(_ image: CGImage) -> [SIMD3<Float>]? {
+        let gw = 24, gh = 16
+        var px = [Float](repeating: 0, count: gw * gh * 4)
+        let info = CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.floatComponents.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let ctx = CGContext(data: &px, width: gw, height: gh, bitsPerComponent: 32, bytesPerRow: gw * 16,
+                                  space: CGColorSpace(name: CGColorSpace.linearSRGB)!, bitmapInfo: info) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: gw, height: gh))
+        return (0..<gw * gh).map { SIMD3(px[$0 * 4], px[$0 * 4 + 1], px[$0 * 4 + 2]) }
     }
 
     // MARK: Curves

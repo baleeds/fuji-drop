@@ -20,6 +20,24 @@ final class LinearRendererTests: XCTestCase {
         XCTAssertLessThan(g.pixels[0], 200)
     }
 
+    /// The colour match finds a cast the reference has (a warmer camera JPEG) and keeps brightness.
+    func testMatchLookRecoversAColourCast() throws {
+        let xt1: [Float] = [8458, -2451, -855, -4597, 12447, 2407, -1475, 2482, 6526].map { $0 / 10000 }
+        let w = 480, h = 320
+        // A scene of varied midtone colours.
+        let load: (Int) -> SIMD3<Float> = { i in
+            let x = Float(i % w) / Float(w), y = Float(i / w) / Float(h)
+            return SIMD3(0.05 + 0.15 * x, 0.06 + 0.1 * y, 0.04 + 0.12 * (1 - x)) * (0.8 + 0.4 * y)
+        }
+        let cast = SIMD3<Float>(1.12, 1, 0.86)
+        let reference = try XCTUnwrap(LinearRenderer.render(width: w, height: h, camXYZ: xt1, exposure: 0.5, balance: cast, load: load))
+        let look = LinearRenderer.matchLook(width: w, height: h, camXYZ: xt1, reference: reference, load: load)
+        let found = look.balance / look.balance.y, wanted = cast / cast.y
+        XCTAssertEqual(found.x, wanted.x, accuracy: 0.03)
+        XCTAssertEqual(found.z, wanted.z, accuracy: 0.03)
+        XCTAssertEqual(look.exposure + log2(LinearRenderer.luminance(look.balance)), 0.5 + log2(LinearRenderer.luminance(cast)), accuracy: 0.15)
+    }
+
     func testCurvesAreMonotonicAndBounded() {
         for curve in LinearRenderer.Curve.allCases {
             var last: Float = -1

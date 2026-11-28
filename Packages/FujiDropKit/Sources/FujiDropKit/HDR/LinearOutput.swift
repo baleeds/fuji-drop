@@ -3,7 +3,8 @@ import CoreImage
 import Foundation
 
 /// The last step shared by DNG saves and HDR merges: from linear camera RGB, render the JPEG
-/// (`LinearRenderer`, brightness matched to the camera's own JPEG), write the DNG with a
+/// (`LinearRenderer`, brightness and colour matched to the camera's own JPEG; the DNG keeps the
+/// as-shot white balance for editing), write the DNG with a
 /// preview scaled from that render and a BaselineExposure that makes Core Image (Photos) open
 /// it about as bright.
 enum LinearOutput {
@@ -32,10 +33,12 @@ enum LinearOutput {
         case .integer(let px): load = { i in SIMD3(Float(px[i * 3]), Float(px[i * 3 + 1]), Float(px[i * 3 + 2])) * gain }
         }
 
-        let ev = camera.map {
-            LinearRenderer.matchExposure(width: w, height: h, camXYZ: image.camXYZ, reference: $0, load: load)
-        } ?? 0
-        guard let full = LinearRenderer.render(width: w, height: h, camXYZ: image.camXYZ, exposure: ev, load: load) else {
+        let look = camera.map {
+            LinearRenderer.matchLook(width: w, height: h, camXYZ: image.camXYZ, reference: $0, load: load)
+        } ?? (exposure: 0, balance: .one)
+        let ev = look.exposure
+        guard let full = LinearRenderer.render(width: w, height: h, camXYZ: image.camXYZ, exposure: ev,
+                                               balance: look.balance, load: load) else {
             throw RAWRenderer.RenderError.cannotRender(name)
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -57,7 +60,9 @@ enum LinearOutput {
         let dng = directory.appendingPathComponent("\(name).DNG")
         try DNGWriter.write(image, to: dng, baselineExposure: baseline, preview: preview(full, maxSide: 1024),
                             compression: compression)
-        return Files(dng: dng, jpeg: jpeg, report: String(format: "JPEG %+.2f EV, BaselineExposure %+.2f", ev, baseline))
+        let b = look.balance
+        return Files(dng: dng, jpeg: jpeg, report: String(format: "JPEG %+.2f EV, balance %.2f/%.2f/%.2f, BaselineExposure %+.2f",
+                                                           ev, b.x, b.y, b.z, baseline))
     }
 
     /// Box-downsampled copy, rows in parallel.

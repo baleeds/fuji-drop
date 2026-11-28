@@ -8,7 +8,8 @@ public struct MergeCache: Sendable {
     public static let defaultKeep = 8
     /// Bumped when the merge itself changes, so older outputs aren't reused (they're pruned
     /// like any other). 2: reference-anchored weights (no blending of moving subjects).
-    public static let version = 2
+    /// 3: the JPEG's colour matched to the camera's JPEG (it read bluer).
+    public static let version = 3
 
     public struct Entry: Sendable, Equatable {
         public var dng: URL

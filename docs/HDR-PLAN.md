@@ -71,6 +71,42 @@ them as RAW+JPEG, `PhotoSaver.editingBase`); `dng_validate`; Lightroom / Capture
 Fujifilm camera profiles and lens corrections still apply to the DNG?); comparing DNG saves at
 100 % with RAF saves; the high-ISO and DR-mode fixtures from the list below.
 
+## Editing DNGs in Apple Photos: measured (Nov 27, 2026)
+
+The owner found our DNGs (single saves and merges) reach "the edge of terrible" sooner than
+RAFs when edited in Photos. Measured through Core Image's `CIRAWFilter` (Photos' RAW engine)
+on the owner's frames, our DNG against the original RAF:
+
+- **Noise reduction flags differ.** For a RAF, Core Image applies colour noise
+  reduction (0.5) and sharpening (0.9) by default and offers luminance NR, detail, contrast
+  and moiré controls. For our linear DNGs every one of those is unsupported: no NR, no
+  sharpening, at all. No DNG tag turns them on (tried `NoiseProfile` in the raw IFD and
+  IFD0, `BaselineNoise`, `BaselineSharpness`, `LinearResponseLimit`, camera-model tags, an
+  older `DNGBackwardVersion`, all together). Apple's NR evidently lives in its demosaic
+  stage, so *any* already-demosaiced (LinearRaw) DNG gets none. Pushing Shadows on an ISO
+  1000 frame shows the sensor's noise unfiltered.
+- **Highlights are not worse.** Matched at midtones and pushed +1.5 EV, the RAF's brightest
+  areas blow (mean 252–254, no texture) while our DNG keeps texture (mean 166–227, spread
+  25–83) on DSCF3218, DSCF3201, DSCF3463 and DSCF2516: Apple renders linear DNGs with a
+  flatter highlight curve. Decoding with LibRaw `highlight = 1` (each channel to its own
+  saturation instead of clipping at the first) only helps frames with real sensor clipping
+  (DSCF3463: the share of the blown region still flat at −0.5 EV fell from 29 % to 15 %);
+  not adopted yet.
+- **White balance is close.** On a 24 × 16 grid of block averages, our DNG differs from the
+  RAF by ΔE 0.6 (daylight) to 2.3 (tungsten) as shot, and ΔE 2–3 when the temperature is
+  moved to anywhere between 2800 K and 7500 K (4.7 at 2800 K on the tungsten frame). A
+  second colour matrix would help a little, not much. Photos shows a different tint number
+  for the same neutral (RAF +23, DNG +8), so setting tint to a fixed value shifts them
+  differently.
+
+**But in practice:** the owner edited a single-frame DNG save in Photos and it held up as well
+as the RAF of the same shot, so the missing NR flags above don't hurt in real use (our colour
+cleanup may cover what matters). The fragile edits were merge-specific, and the merge tried
+was the old one with blotchy skin (fixed since: reference-anchored weights). Still to compare:
+the fixed merge against a single DNG in Photos. If merges remain worse, write them as 16-bit
+integer + lossless JPEG like single saves (the reference frame's clip at 16383, leaving 2
+stops of headroom for recovered highlights) instead of uncompressed half floats.
+
 ## Decisions already made
 
 - **Scope:** DNG output for HDR merges, plus an optional "save as DNG" format for ordinary

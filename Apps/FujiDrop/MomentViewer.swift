@@ -26,6 +26,8 @@ struct MomentViewer: View {
     @State private var group = ZoomGroup()
     /// The HDR frame to show once the merge started here finishes.
     @State private var awaitedMerge: String?
+    /// The bracket shown in the Merge sheet before merging.
+    @State private var confirming: BracketRef?
 
     var body: some View {
         // Only the frames still on the card (after reconnecting, some may be gone), as the
@@ -71,6 +73,13 @@ struct MomentViewer: View {
                 self.awaitedMerge = nil
             }
         }
+        .sheet(item: $confirming) { ref in
+            MergeSheet(model: model, ids: ref.ids) {
+                confirming = nil
+                startMerge(ref.ids)
+            }
+            .presentationDetents([.height(330)])
+        }
         .background(.black)
         .navigationTitle(title(ids, shown: shown, other: other))
         .navigationBarTitleDisplayMode(.inline)
@@ -80,12 +89,12 @@ struct MomentViewer: View {
             if let bracket = bracket(ids, shown: shown), !model.isMerged(bracket),
                model.merging[model.mergeKey(bracket)] == nil {
                 Button {
-                    startMerge(bracket)
+                    confirming = BracketRef(ids: bracket)
                 } label: {
                     Label("Merge", systemImage: "square.3.layers.3d")
                         .labelStyle(.titleAndIcon)
                 }
-                .accessibilityHint("Merges the exposure bracket into one HDR photo")
+                .accessibilityHint("Shows the exposure bracket to merge into one HDR photo")
             }
             if ids.count > 1 {
                 Button {
@@ -450,5 +459,80 @@ private struct Filmstrip: View {
                         .padding(3)
                 }
             }
+    }
+}
+
+private struct BracketRef: Identifiable {
+    let ids: [String]
+    var id: String { ids.joined(separator: ",") }
+}
+
+/// What Merge will combine, before it starts: the bracket's frames from darkest to brightest,
+/// each with its exposure relative to the reference (middle) frame and its shutter speed.
+private struct MergeSheet: View {
+    @ObservedObject var model: ImportModel
+    let ids: [String]
+    let merge: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let reference = model.referenceFrame(ids)
+        let refExposure = reference.flatMap { model.shots[$0]?.exposure }
+        let frames = ids.sorted { (model.shots[$0]?.exposure?.ev ?? 0) > (model.shots[$1]?.exposure?.ev ?? 0) }
+        VStack(spacing: 16) {
+            VStack(spacing: 4) {
+                Text("Merge into one HDR photo").font(.headline)
+                Text("The middle exposure is the reference: it gives the midtones, the others fill shadows and highlights.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(frames, id: \.self) { id in
+                    frame(id, isReference: id == reference, refExposure: refExposure)
+                }
+            }
+            Button(action: merge) {
+                Text("Merge \(ids.count) frames").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            Button("Cancel", role: .cancel) { dismiss() }
+        }
+        .padding(20)
+    }
+
+    private func frame(_ id: String, isReference: Bool, refExposure: Exposure?) -> some View {
+        let exposure = model.shots[id]?.exposure
+        return VStack(spacing: 4) {
+            PreviewImage(shot: model.shots[id])
+                .frame(width: 96, height: 72)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    if isReference { RoundedRectangle(cornerRadius: 6).strokeBorder(.yellow, lineWidth: 2) }
+                }
+            Text(stops(exposure, refExposure, isReference: isReference))
+                .font(.caption.weight(.semibold).monospacedDigit())
+            Text(exposure.map { shutter($0.time) } ?? id)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// "Reference", or e.g. "+1 EV" / "−⅔ EV" relative to the reference.
+    private func stops(_ e: Exposure?, _ ref: Exposure?, isReference: Bool) -> String {
+        if isReference { return "Reference" }
+        guard let e, let ref else { return "" }
+        let s = e.stops(relativeTo: ref)
+        let thirds = Int((s * 3).rounded())
+        let whole = abs(thirds) / 3, rest = abs(thirds) % 3
+        let fraction = rest == 0 ? "" : rest == 1 ? "⅓" : "⅔"
+        let number = whole == 0 && !fraction.isEmpty ? fraction : "\(whole)\(fraction)"
+        return "\(thirds < 0 ? "−" : "+")\(number) EV"
+    }
+
+    private func shutter(_ t: Double) -> String {
+        t >= 1 ? String(format: "%.0f s", t) : "1/\(Int((1 / t).rounded())) s"
     }
 }
