@@ -43,6 +43,9 @@ final class ImportModel: ObservableObject {
         /// Its `raw` is the first frame's file (only for its size); it's never read from the
         /// camera, and its "RAW" is the merged DNG (`rawURL`).
         var mergedFrom: [String]?
+        /// A merged frame whose files were cleared from storage: shown dimmed with Merge again.
+        /// Merges are never rebuilt without being asked.
+        var mergeMissing = false
 
         var isMerged: Bool { mergedFrom != nil }
 
@@ -130,8 +133,18 @@ final class ImportModel: ObservableObject {
     private static let savedFormatsKey = "savedFormats.v1"
     /// Saves selections to Photos in the background (see `SaveQueue`).
     lazy var saves = SaveQueue(model: self)
-    @Published var grouper = MomentGrouper() {
-        didSet { if grouper != oldValue { regroup() } }
+    /// Moment grouping (Settings › Moments), kept across launches.
+    @Published var grouper = ImportModel.savedGrouper() {
+        didSet {
+            guard grouper != oldValue else { return }
+            UserDefaults.standard.set(try? JSONEncoder().encode(grouper), forKey: Self.grouperKey)
+            regroup()
+        }
+    }
+    private static let grouperKey = "grouping.v1"
+    private static func savedGrouper() -> MomentGrouper {
+        UserDefaults.standard.data(forKey: grouperKey)
+            .flatMap { try? JSONDecoder().decode(MomentGrouper.self, from: $0) } ?? MomentGrouper()
     }
     /// Exposure brackets of the selected day (frame ids in time order), and each frame's.
     @Published private(set) var brackets: [[String]] = []
@@ -160,6 +173,12 @@ final class ImportModel: ObservableObject {
     private var previewStart: (date: Date, alreadyDone: Int)?
     private var queue: [String] = []
     private var worker: Task<Void, Never>?
+    /// Shots waiting for best-shot scoring (which also finds faces), scored one at a time.
+    /// Frames of the moment on screen (`urgentScores`) go first, at a higher priority.
+    private var scoreQueue: [String] = []
+    private var scoreWorker: Task<Void, Never>?
+    private var urgentScores: Set<String> = []
+    private var scoreLogCount = 0
     /// Bumped whenever camera work stops, so a worker or read finishing late is ignored.
     private var workerGeneration = 0
     /// Feature-print distances by `Shot.key` pair, so they survive reconnecting.
@@ -191,6 +210,9 @@ final class ImportModel: ObservableObject {
         }
         let resuming = cameraID == id
         cameraID = id
+        // The shots are rebuilt below, merged frames included: look their merges up again so
+        // one whose files were cleared is shown dimmed with Merge again, not as a plain frame.
+        mergeLookups = []
 
         let pairs = camera.shots
         let old = shots
@@ -263,6 +285,7 @@ final class ImportModel: ObservableObject {
         connection = .none
         days = []; selectedDayID = nil; shots = [:]; order = []; moments = []
         previewStart = nil; distanceCache = [:]
+        scoreQueue = []; urgentScores = []
         brackets = []; bracketOf = [:]
         mergeTasks.values.forEach { $0.cancel() }
         mergeTasks = [:]; merging = [:]
@@ -364,13 +387,22 @@ final class ImportModel: ObservableObject {
         camera.record("Preview queue: starting with \(queue.count) shots.")
         let generation = workerGeneration
         worker = Task { [weak self] in
-            var loaded = 0
+            var loaded = 0, fromCache = 0, fromCamera = 0
             while let self, !Task.isCancelled, let id = self.nextQueued() {
+                let waitStart = Date()
                 while !self.rawDownloads.isEmpty, !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(100))
                 }
+                let waited = Date().timeIntervalSince(waitStart)
+                if waited > 2 {
+                    self.camera.record(String(format: "Preview queue: waited %.1f s for RAF downloads before %@", waited, id))
+                }
                 let started = Date()
-                await self.loadPreview(id)
+                switch await self.loadPreview(id) {
+                case .cache: fromCache += 1
+                case .camera: fromCamera += 1
+                case .none: break
+                }
                 loaded += 1
                 if loaded <= 3 || loaded % 25 == 0 {
                     self.camera.record(String(format: "Preview queue: %@ done in %.2f s (%d so far, %d queued)",
@@ -378,7 +410,7 @@ final class ImportModel: ObservableObject {
                 }
             }
             guard let self, self.workerGeneration == generation else { return }
-            self.camera.record("Preview queue: idle after \(loaded) shots.")
+            self.camera.record("Preview queue: idle after \(loaded) shots (\(fromCache) from cache, \(fromCamera) read from camera).")
             self.worker = nil
             self.pruneCache()
         }
@@ -388,32 +420,57 @@ final class ImportModel: ObservableObject {
         queue.isEmpty ? nil : queue.removeFirst()
     }
 
-    private func loadPreview(_ id: String) async {
-        guard let shot = shots[id], shot.needsPreview, let cache else { return }
+    enum PreviewSource { case cache, camera }
+
+    /// Loads one shot's preview from the cache or the camera. Returns where it came from (nil
+    /// if nothing was loaded). Anything over 2 s logs how the time was spent.
+    @discardableResult
+    private func loadPreview(_ id: String) async -> PreviewSource? {
+        guard let shot = shots[id], shot.needsPreview, let cache else { return nil }
         let key = shot.key, size = shot.size
         let generation = workerGeneration
+        let t0 = Date()
+        var lookup: TimeInterval = 0, store: TimeInterval = 0
+        var read: CameraSession.EmbeddedPreview?
         do {
             // Cache file I/O off the main actor.
             let url: URL
-            if let cached = await Task.detached(priority: .userInitiated, operation: {
+            let cached = await Task.detached(priority: .userInitiated, operation: {
                 cache.cachedURL(name: id, size: size)
-            }).value {
+            }).value
+            lookup = Date().timeIntervalSince(t0)
+            if let cached {
                 url = cached
             } else {
                 let preview = try await camera.embeddedPreview(of: shot.raw)
+                read = preview
                 // Disconnected or reset while reading: drop it (the shot is queued again on resume).
-                guard isCurrent(generation) else { return }
+                guard isCurrent(generation) else { return nil }
+                let t1 = Date()
                 url = try await Task.detached(priority: .userInitiated) {
                     try cache.store(preview.jpeg, name: id, size: size)
                 }.value
+                store = Date().timeIntervalSince(t1)
             }
-            guard update(id, key: key, { $0.previewURL = url }) else { return }
+            let total = Date().timeIntervalSince(t0)
+            if total > 2 {
+                if let read {
+                    let other = total - lookup - read.headerSeconds - read.jpegSeconds - store
+                    camera.record(String(format: "Slow preview %@: %.2f s = cache lookup %.2f, header read %.2f, JPEG read %.2f (%d KB), cache write %.2f, other %.2f",
+                                         id, total, lookup, read.headerSeconds, read.jpegSeconds, read.jpeg.count / 1000, store, other))
+                } else {
+                    camera.record(String(format: "Slow preview %@: %.2f s, from cache (lookup %.2f)", id, total, lookup))
+                }
+            }
+            guard update(id, key: key, { $0.previewURL = url }) else { return nil }
             analyse(id, key: key, url: url)
+            return read == nil ? .cache : .camera
         } catch {
             // A read cut short by unplugging isn't a problem with the file.
-            guard isCurrent(generation) else { return }
+            guard isCurrent(generation) else { return nil }
             update(id, key: key) { $0.error = error.localizedDescription }
-            camera.record("Preview \(id) failed: \(error.localizedDescription)")
+            camera.record(String(format: "Preview %@ failed after %.2f s: %@", id, Date().timeIntervalSince(t0), error.localizedDescription))
+            return nil
         }
     }
 
@@ -425,34 +482,110 @@ final class ImportModel: ObservableObject {
     private func analyse(_ id: String, key: String, url: URL) {
         let logDetail = decodeLogCount < 3
         decodeLogCount += 1
+        let cache = self.cache, size = shots[id]?.size ?? 0
         Task { [weak self] in
             let t0 = Date()
-            let (thumb, exposure) = await Background.decode {
-                (ImageLoading.thumbnail(at: url, maxPixelSize: 360), Exposure(contentsOf: url))
+            // The score and feature print saved from an earlier session, if still valid.
+            let (thumb, exposure, savedScore, savedPrint) = await Background.decode {
+                (ImageLoading.thumbnail(at: url, maxPixelSize: 360), Exposure(contentsOf: url),
+                 cache?.readSidecar(.score, name: id, size: size).flatMap { SavedAnalysis.score(from: $0) },
+                 cache?.readSidecar(.print, name: id, size: size).flatMap { SavedAnalysis.print(from: $0) })
             }
             if logDetail {
-                self?.camera.record(String(format: "Decode %@: %@ in %.2f s", id, thumb == nil ? "failed" : "ok", Date().timeIntervalSince(t0)))
+                self?.camera.record(String(format: "Decode %@: %@ in %.2f s; saved score %@, saved print %@", id,
+                                           thumb == nil ? "failed" : "ok", Date().timeIntervalSince(t0),
+                                           savedScore == nil ? "no" : "yes", savedPrint == nil ? "no" : "yes"))
             }
             guard let self, self.finishThumbnail(id, key: key, thumb) else { return }
             self.update(id, key: key) { $0.exposure = exposure }
-            let t1 = Date()
-            let print = await Background.vision { () -> FeaturePrint? in
-                guard let small = ImageLoading.thumbnail(at: url, maxPixelSize: 512) else { return nil }
-                return try? FeaturePrinter.featurePrint(of: small)
+            if let savedScore {
+                self.update(id, key: key) { $0.score = savedScore }
+            } else {
+                // Scoring only needs the preview, so it doesn't wait for the feature print. It
+                // runs at background priority (behind grouping) unless the frame is on screen.
+                self.enqueueScore(id)
             }
-            if logDetail {
-                self.camera.record(String(format: "Vision %@: %@ in %.2f s", id, print == nil ? "failed" : "ok", Date().timeIntervalSince(t1)))
+            let print: FeaturePrint?
+            if let savedPrint {
+                print = savedPrint
+            } else {
+                let t1 = Date()
+                print = await Background.vision { () -> FeaturePrint? in
+                    guard let small = ImageLoading.thumbnail(at: url, maxPixelSize: 512) else { return nil }
+                    return try? FeaturePrinter.featurePrint(of: small)
+                }
+                if logDetail {
+                    self.camera.record(String(format: "Vision %@: %@ in %.2f s", id, print == nil ? "failed" : "ok", Date().timeIntervalSince(t1)))
+                }
+                if let print, let cache {
+                    Task { await Background.decode { SavedAnalysis.encode(print).map { cache.writeSidecar($0, .print, name: id, size: size) } } }
+                }
             }
             guard self.update(id, key: key, { $0.print = print }) else { return }
-            if self.order.contains(id) { self.regroup() }
-            await self.scoreShot(id, key: key, url: url, log: logDetail)
+            if self.order.contains(id) { self.scheduleRegroup() }
         }
     }
 
+    private func enqueueScore(_ id: String) {
+        guard !scoreQueue.contains(id) else { return }
+        if urgentScores.contains(id) { scoreQueue.insert(id, at: 0) } else { scoreQueue.append(id) }
+        guard scoreWorker == nil else { return }
+        scoreWorker = Task { [weak self] in
+            while let self, !self.scoreQueue.isEmpty {
+                let id = self.scoreQueue.removeFirst()
+                guard let shot = self.shots[id], shot.score == nil, !shot.scoreFailed,
+                      let url = shot.previewURL else { continue }
+                let log = self.scoreLogCount < 3
+                self.scoreLogCount += 1
+                await self.scoreShot(id, key: shot.key, url: url, log: log, urgent: self.urgentScores.contains(id))
+            }
+            self?.scoreWorker = nil
+        }
+    }
+
+    /// Scores these frames (the moment on screen) before any others. Frames whose preview
+    /// hasn't arrived yet go first when it does.
+    func prioritizeScoring(_ ids: [String]) {
+        urgentScores = Set(ids)
+        let waiting = scoreQueue.filter(urgentScores.contains)
+        scoreQueue.removeAll { urgentScores.contains($0) }
+        scoreQueue.insert(contentsOf: waiting, at: 0)
+    }
+
+    /// The moment left the screen: its frames lose their priority.
+    func endScoringPriority(_ ids: [String]) {
+        if urgentScores == Set(ids) { urgentScores = [] }
+    }
+
+    /// Whether a frame is still waiting to be scored (merged HDR frames never are).
+    private func isScoring(_ id: String) -> Bool {
+        guard let shot = shots[id] else { return false }
+        return shot.score == nil && shot.isRankable && !shot.isMerged
+    }
+
+    /// What's known about a frame's faces (found while scoring).
+    enum FaceStatus {
+        case pending
+        case measured([FaceBox])
+        /// Never measured: a merged HDR frame, or scoring failed.
+        case unavailable
+    }
+
+    func faceStatus(_ id: String) -> FaceStatus {
+        if let score = shots[id]?.score { return .measured(score.faces) }
+        return isScoring(id) ? .pending : .unavailable
+    }
+
+    /// Each person's face across the frames: one row per person, one entry per frame (nil
+    /// where they weren't found, or the frame wasn't measured).
+    func faceRows(_ ids: [String]) -> [[FaceBox?]] {
+        FaceTracks.match(ids.map { if case .measured(let faces) = faceStatus($0) { faces } else { [] } })
+    }
+
     /// Measures focus, faces and aesthetics on the full 1920 px preview.
-    private func scoreShot(_ id: String, key: String, url: URL, log: Bool) async {
+    private func scoreShot(_ id: String, key: String, url: URL, log: Bool, urgent: Bool) async {
         let t0 = Date()
-        let measured = await Background.score { () -> (CGImage, ShotScore)? in
+        let measured = await Background.score(urgent: urgent) { () -> (CGImage, ShotScore)? in
             guard let image = ImageLoading.thumbnail(at: url, maxPixelSize: 1920),
                   let score = try? ShotScorer.measure(image) else { return nil }
             return (image, score)
@@ -466,12 +599,17 @@ final class ImportModel: ObservableObject {
         var score = measured.1
         score.aesthetics = await ShotScorer.aesthetics(of: image)
         if log {
-            camera.record(String(format: "Score %@ in %.2f s: sharp %.0f, face %@, aesthetics %@",
-                                 id, Date().timeIntervalSince(t0), score.sharpness,
+            camera.record(String(format: "Score %@ in %.2f s%@: sharp %.0f, face %@, aesthetics %@",
+                                 id, Date().timeIntervalSince(t0), urgent ? " (on screen)" : "", score.sharpness,
                                  score.faceQuality.map { String(format: "%.2f", $0) } ?? "none",
                                  score.aesthetics.map { String(format: "%.2f", $0) } ?? "none"))
         }
-        update(id, key: key) { $0.score = score }
+        // A score whose aesthetics request failed (e.g. under memory pressure) is used this
+        // session but not saved, so the next session measures it again.
+        guard update(id, key: key, { $0.score = score }), score.aesthetics != nil,
+              let cache, let size = shots[id]?.size else { return }
+        let saved = score
+        Task { await Background.decode { SavedAnalysis.encode(saved).map { cache.writeSidecar($0, .score, name: id, size: size) } } }
     }
 
     /// Returns whether analysis should continue.
@@ -509,7 +647,7 @@ final class ImportModel: ObservableObject {
     /// fails, the file is no longer on the card, the session ends, or the caller is cancelled.
     func rawURL(_ id: String) async -> URL? {
         guard let key = shots[id]?.key else { return nil }
-        // A merged frame's RAW is its DNG, merged again if the cache lost it.
+        // A merged frame's RAW is its DNG (nil if the merge was cleared: never re-merged here).
         if let sources = shots[id]?.mergedFrom { return await mergedEntry(sources)?.dng }
         while !Task.isCancelled {
             guard shots[id]?.key == key else { return nil }
@@ -585,10 +723,12 @@ final class ImportModel: ObservableObject {
     func pruneCache() {
         let cache = cacheRoot
         Task {
+            let started = Date()
             let result = await Task.detached(priority: .utility) { cache.prune() }.value
-            if result.removed.files > 0 {
-                camera.record("Preview cache: removed \(result.removed.files) old previews (\(result.removed.bytes / 1_000_000) MB).")
-            }
+            camera.record(String(format: "Preview cache: %d previews, %lld of %lld MB; trimmed %d (%lld MB) in %.2f s.",
+                                 result.remaining.files, result.remaining.bytes / 1_000_000,
+                                 PreviewCache.defaultMaxBytes / 1_000_000, result.removed.files,
+                                 result.removed.bytes / 1_000_000, Date().timeIntervalSince(started)))
             cacheUsage = result.remaining
         }
     }
@@ -602,6 +742,20 @@ final class ImportModel: ObservableObject {
     }
 
     // MARK: Moments
+
+    /// Regroups once for a burst of new feature prints (saved ones arrive hundreds at a time)
+    /// instead of once per print.
+    private func scheduleRegroup() {
+        guard pendingRegroup == nil else { return }
+        pendingRegroup = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self, !Task.isCancelled else { return }
+            self.pendingRegroup = nil
+            self.regroup()
+        }
+    }
+
+    private var pendingRegroup: Task<Void, Never>?
 
     private func regroup() {
         // Undated shots (camera clock never set) have no time to group by: keep each one on
@@ -667,8 +821,11 @@ final class ImportModel: ObservableObject {
         if var existing = shots[id], existing.key == key {
             if existing.previewURL != entry?.jpeg {
                 existing.previewURL = entry?.jpeg
+                if entry != nil { existing.mergeMissing = false }
                 shots[id] = existing
                 if let jpeg = entry?.jpeg { loadMergedThumbnail(id, key: key, url: jpeg) }
+                // Merged again after being cleared: a selection waiting on it can save now.
+                if entry != nil, picks.contains(key), saved[key] == nil { saves.save([id]) }
             }
             return id
         }
@@ -682,13 +839,15 @@ final class ImportModel: ObservableObject {
         shot.exposure = reference?.exposure
         shots[id] = shot
         if let jpeg = entry?.jpeg { loadMergedThumbnail(id, key: key, url: jpeg) }
-        // Selected but not yet saved (e.g. cut off by an unplug): carry on.
-        if picks.contains(key), saved[key] == nil { saves.save([id]) }
+        // Selected but not yet saved (e.g. cut off by an unplug): carry on, if the merge is
+        // still on disk (otherwise once it's merged again).
+        if entry != nil, picks.contains(key), saved[key] == nil { saves.save([id]) }
         return id
     }
 
     /// Finds a finished merge on disk off the main actor (once per bracket), then shows it.
-    /// If it's gone (pruned, or made by an older version of the merge), merges it again.
+    /// If it's gone (pruned, iOS cleared the cache, or made by an older version of the merge),
+    /// the HDR frame is shown dimmed with Merge again: merges are never started automatically.
     private func lookUpMerge(_ ids: [String]) {
         let key = mergeKey(ids), name = mergedID(ids), cache = mergeCache
         guard mergeLookups.insert(key).inserted else { return }
@@ -696,8 +855,9 @@ final class ImportModel: ObservableObject {
             if let entry = await Background.decode({ cache.entry(key: key, name: name) }) {
                 mergeEntries[key] = entry
                 if order.contains(ids[0]) { regroup() }
-            } else {
-                merge(ids) // regroups when done
+            } else if mergeTasks[key] == nil, let shot = shots[name], shot.mergedFrom != nil {
+                update(name, key: shot.key) { $0.mergeMissing = true }
+                camera.record("HDR \(name): merged files were cleared from storage; tap Merge again to rebuild.")
             }
         }
     }
@@ -709,16 +869,18 @@ final class ImportModel: ObservableObject {
         }
     }
 
-    /// Starts merging a bracket (the Merge button). Progress and failures are in `merging`;
+    /// Merges a bracket: the Merge and Merge again buttons, and nothing else (a merge is a
+    /// minute or more of full CPU on the phone). Progress and failures are in `merging`;
     /// when done the HDR frame appears in its moment.
     func merge(_ ids: [String]) {
-        Task { _ = await mergedEntry(ids) }
+        camera.record("HDR \(mergedID(ids)): merge requested.")
+        Task { _ = await mergedEntry(ids, mergingIfMissing: true) }
     }
 
-    /// The bracket's merged DNG and JPEG: cached, or merged now (shared by concurrent callers).
-    /// Downloads the RAFs (waiting out an unplug), then decodes and merges them on the RAW
-    /// queue: about 10 s on a Mac, longer on the phone.
-    func mergedEntry(_ ids: [String]) async -> MergeCache.Entry? {
+    /// The bracket's merged DNG and JPEG if they're on disk, or a merge already running.
+    /// Only `merge` passes `mergingIfMissing`: downloads the RAFs (waiting out an unplug),
+    /// then decodes and merges them on the RAW queue (shared by concurrent callers).
+    func mergedEntry(_ ids: [String], mergingIfMissing: Bool = false) async -> MergeCache.Entry? {
         let key = mergeKey(ids), name = mergedID(ids)
         let cache = mergeCache
         if let entry = mergeEntries[key] { return entry }
@@ -727,6 +889,7 @@ final class ImportModel: ObservableObject {
             return entry
         }
         if let running = mergeTasks[key] { return await running.value }
+        guard mergingIfMissing else { return nil }
         let task = Task { [weak self] () -> MergeCache.Entry? in
             guard let self else { return nil }
             return await self.runMerge(ids, key: key, name: name)

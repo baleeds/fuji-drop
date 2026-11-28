@@ -178,17 +178,23 @@ public final class CameraSession: NSObject, ObservableObject {
     public struct EmbeddedPreview: Sendable {
         public var header: RAFHeader
         public var jpeg: Data
+        /// How long each of the two reads took, for diagnosing slow previews.
+        public var headerSeconds: TimeInterval = 0
+        public var jpegSeconds: TimeInterval = 0
     }
 
     /// Fetches the JPEG preview embedded in a RAF with two partial reads:
     /// the header, then exactly the preview's byte range.
     public func embeddedPreview(of raf: ICCameraFile) async throws -> EmbeddedPreview {
+        let t0 = Date()
         let head = try await readData(raf, offset: 0, length: RAFHeader.readLength)
         guard let header = RAFHeader(head) else {
             throw CameraError.notRAF(PTP.hex(head, limit: 16))
         }
+        let t1 = Date()
         let jpeg = try await readData(raf, offset: header.jpegOffset, length: header.jpegLength)
-        return EmbeddedPreview(header: header, jpeg: jpeg)
+        return EmbeddedPreview(header: header, jpeg: jpeg, headerSeconds: t1.timeIntervalSince(t0),
+                               jpegSeconds: Date().timeIntervalSince(t1))
     }
 
     // MARK: PTP pass-through

@@ -98,8 +98,15 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    /// Where this pane was looking when its image was swapped, restored once the new image is
+    /// laid out.
+    private var keptViewport: Viewport?
+
+    /// Swaps the image and keeps looking at the same spot: compare's full-resolution RAW
+    /// replacing the preview, or another frame of the same scene, must not reset the zoom.
     func setImage(_ image: UIImage) {
         guard imageView.image !== image else { return }
+        if laidOutSize != .zero, contentSize.width > 0 { keptViewport = viewport }
         imageView.image = image
         laidOutSize = .zero
         setNeedsLayout()
@@ -107,15 +114,21 @@ final class ZoomingScrollView: UIScrollView, UIScrollViewDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Fit the image to the view at zoom 1 whenever the view size or image changes.
+        // Fit the image to the view at zoom 1 whenever the view size or image changes, then
+        // return to this pane's own viewport (else the group's). The reset is never reported
+        // to the group: if it were (mid-pan, finger down), the other pane would jump to fit.
         if bounds.size != laidOutSize, bounds.width > 0, bounds.height > 0 {
             laidOutSize = bounds.size
+            let restore = keptViewport ?? group?.viewport
+            keptViewport = nil
+            applying = true
             zoomScale = 1
             imageView.frame = CGRect(origin: .zero, size: fittedSize())
             contentSize = imageView.frame.size
             centerContent()
             contentOffset = CGPoint(x: -contentInset.left, y: -contentInset.top)
-            if let shared = group?.viewport { apply(shared, animated: false) }
+            applying = false
+            if let restore { apply(restore, animated: false) }
         }
     }
 

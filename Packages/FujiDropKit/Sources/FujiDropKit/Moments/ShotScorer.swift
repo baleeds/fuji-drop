@@ -28,25 +28,28 @@ public enum ShotScorer {
         } else {
             region = CGRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6)
         }
-        // Vision's origin is bottom-left; the bitmap's is top-left.
-        let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
-        let topLeft = CGRect(x: region.minX, y: 1 - region.maxY, width: region.width, height: region.height)
-            .intersection(unit)
+        let focus = topLeft(region).intersection(unit)
 
         let size = CGSize(width: image.width, height: image.height)
-        let eyes = (landmarks.results ?? [])
-            .filter { $0.boundingBox.width >= minFaceWidth }
-            .compactMap { eyeOpenness($0, imageSize: size) }
-            .min()
+        let faceBoxes: [FaceBox] = (landmarks.results ?? [])
+            .filter { $0.boundingBox.width >= minCloseUpWidth }
+            .map { FaceBox(rect: topLeft($0.boundingBox), eyeOpenness: eyeOpenness($0, imageSize: size)) } // unclipped
 
         guard let gray = GrayImage(image) else { throw ScoreError.noBitmap }
-        return ShotScore(sharpness: Sharpness.score(gray, region: topLeft.isNull ? unit : topLeft),
-                         faceQuality: quality, eyeOpenness: eyes)
+        return ShotScore(sharpness: Sharpness.score(gray, region: focus.isNull ? unit : focus),
+                         faceQuality: quality, faces: faceBoxes)
     }
 
-    /// Faces narrower than this fraction of the frame (people in the background) don't count
-    /// for closed eyes: their landmarks are too coarse.
-    static let minFaceWidth: CGFloat = 0.06
+    /// Faces narrower than this fraction of the frame (under ~75 px in the 1920 px preview)
+    /// aren't worth a close-up.
+    static let minCloseUpWidth: CGFloat = 0.04
+
+    private static let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+
+    /// A Vision rect (bottom-left origin) in the bitmap's top-left coordinates.
+    static func topLeft(_ r: CGRect) -> CGRect {
+        CGRect(x: r.minX, y: 1 - r.maxY, width: r.width, height: r.height)
+    }
 
     /// Mean of both eyes' outline height / width, in image pixels.
     static func eyeOpenness(_ face: VNFaceObservation, imageSize: CGSize) -> Float? {

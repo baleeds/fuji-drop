@@ -1,23 +1,26 @@
 import Foundation
 
 /// Raw per-frame measurements used to suggest a moment's best frame.
-public struct ShotScore: Equatable, Sendable {
+public struct ShotScore: Equatable, Sendable, Codable {
     /// Laplacian focus measure on the subject (see `Sharpness`). Only comparable within a scene.
     public var sharpness: Float
     /// Best face capture quality (0…1: focus, eyes, pose, lighting), nil if no face was found.
     public var faceQuality: Float?
     /// Vision's overall aesthetics score (-1…1), nil if unavailable.
     public var aesthetics: Float?
-    /// Eye openness of the least-open face big enough to matter: eye outline height / width,
-    /// averaged over both eyes (open ≈ 0.3+, closed ≈ 0.1). Nil if no such face.
-    public var eyeOpenness: Float?
+    /// Faces big enough to look at (`ShotScorer.minCloseUpWidth`), for the close-ups.
+    public var faces: [FaceBox]
+
+    /// Eye openness of the least-open face big enough to count (`FaceBox.countedEyeOpenness`).
+    /// Nil if no such face.
+    public var eyeOpenness: Float? { faces.compactMap(\.countedEyeOpenness).min() }
 
     public init(sharpness: Float, faceQuality: Float? = nil, aesthetics: Float? = nil,
-                eyeOpenness: Float? = nil) {
+                faces: [FaceBox] = []) {
         self.sharpness = sharpness
         self.faceQuality = faceQuality
         self.aesthetics = aesthetics
-        self.eyeOpenness = eyeOpenness
+        self.faces = faces
     }
 }
 
@@ -100,7 +103,7 @@ public enum BestShot {
             // Soft only relative to a sharper frame, so a lone frame (or a moment where nothing
             // measured any detail, e.g. lens cap on) is never flagged.
             if scores.count > 1, maxSharpness > 0, sharp < thresholds.softFocus { flaws.append(.softFocus) }
-            if let eyes = s.eyeOpenness, eyes < thresholds.eyesClosed { flaws.append(.eyesClosed) }
+            if s.faces.contains(where: { $0.eyesClosed(below: thresholds.eyesClosed) }) { flaws.append(.eyesClosed) }
             if let q = s.faceQuality, q < thresholds.unclearFace, bestFace >= thresholds.goodFace {
                 flaws.append(.faceUnclear)
             }

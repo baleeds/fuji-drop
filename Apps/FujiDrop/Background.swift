@@ -15,7 +15,13 @@ enum Background {
 
     static func decode<T>(_ work: @escaping @Sendable () -> T) async -> T { await run(on: decodeQueue, work) }
     static func vision<T>(_ work: @escaping @Sendable () -> T) async -> T { await run(on: visionQueue, work) }
-    static func score<T>(_ work: @escaping @Sendable () -> T) async -> T { await run(on: scoreQueue, work) }
+    /// `urgent`: a frame of the moment on screen, raised to user-initiated priority.
+    static func score<T>(urgent: Bool = false, _ work: @escaping @Sendable () -> T) async -> T {
+        guard urgent else { return await run(on: scoreQueue, work) }
+        return await withCheckedContinuation { cont in
+            scoreQueue.async(qos: .userInitiated, flags: .enforceQoS) { cont.resume(returning: work()) }
+        }
+    }
     static func raw<T>(_ work: @escaping @Sendable () -> T) async -> T { await run(on: rawQueue, work) }
 
     private static func run<T>(on queue: DispatchQueue, _ work: @escaping @Sendable () -> T) async -> T {

@@ -27,6 +27,46 @@ final class PreviewImageLoader: @unchecked Sendable {
         }
     }
 
+    /// Square close-ups of faces (`rects`: normalized, top-left origin; nil entries give nil)
+    /// from one frame's 1920 px preview, with room for hair and chin. The preview is decoded
+    /// once for all its faces and not kept: each close-up is redrawn small and cached alone.
+    func faceCrops(url: URL, rects: [CGRect?], pixels: Int) async -> [UIImage?] {
+        let keys = rects.map { $0.map { String(format: "%@@face %.4f %.4f %.4f %d", url.path, $0.minX, $0.minY, $0.width, pixels) as NSString } }
+        var crops = keys.map { $0.flatMap { cache.object(forKey: $0) } }
+        let missing = rects.indices.filter { rects[$0] != nil && crops[$0] == nil }
+        guard !missing.isEmpty else { return crops }
+        let wanted = missing.compactMap { rects[$0] }
+        let decoded = cache.object(forKey: "\(url.path)@1920" as NSString)?.cgImage
+        let made = await Background.decode { () -> [UIImage?] in
+            guard let preview = decoded ?? ImageLoading.thumbnail(at: url, maxPixelSize: 1920) else {
+                return wanted.map { _ in nil }
+            }
+            return wanted.map { Self.crop(preview, to: $0, pixels: pixels) }
+        }
+        for (i, image) in zip(missing, made) {
+            crops[i] = image
+            if let image, let key = keys[i] {
+                cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4))
+            }
+        }
+        return crops
+    }
+
+    private static func crop(_ image: CGImage, to rect: CGRect, pixels: Int) -> UIImage? {
+        let w = CGFloat(image.width), h = CGFloat(image.height)
+        let side = max(rect.width * w, rect.height * h) * 1.6
+        let crop = CGRect(x: rect.midX * w - side / 2, y: rect.midY * h - side / 2, width: side, height: side)
+            .intersection(CGRect(x: 0, y: 0, width: w, height: h)).integral
+        guard let cut = image.cropping(to: crop) else { return nil }
+        let scale = min(CGFloat(pixels), max(crop.width, crop.height)) / max(crop.width, crop.height)
+        let size = CGSize(width: crop.width * scale, height: crop.height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.preferredRange = .standard // 8 bits a channel, as the cache's cost assumes
+        return UIGraphicsImageRenderer(size: size, format: format)
+            .image { _ in UIImage(cgImage: cut).draw(in: CGRect(origin: .zero, size: size)) }
+    }
+
     /// A RAF already decoded at full resolution, without waiting.
     func cachedFullResolution(raw: URL) -> UIImage? {
         cache.object(forKey: Self.fullKey(raw))
@@ -72,7 +112,7 @@ struct PreviewImage: View {
         GeometryReader { geo in
             let pixels = PreviewImageLoader.bucket(Int(max(geo.size.width, geo.size.height) * displayScale))
             ZStack {
-                Rectangle().fill(Color(white: 0.12))
+                Rectangle().fill(Color.tilePlaceholder)
                 if let image = (sharp?.url == shot?.previewURL ? sharp?.image : nil) ?? shot?.thumbnail {
                     Image(uiImage: image)
                         .resizable()
@@ -85,6 +125,7 @@ struct PreviewImage: View {
                         .accessibilityLabel("Preview failed")
                 }
             }
+            .dimmedIfMergeMissing(shot)
             .task(id: LoadKey(url: shot?.previewURL, pixels: pixels)) {
                 guard let url = shot?.previewURL, pixels > 360,
                       let image = await PreviewImageLoader.shared.load(url: url, maxPixelSize: pixels)
@@ -97,5 +138,17 @@ struct PreviewImage: View {
     private struct LoadKey: Equatable {
         let url: URL?
         let pixels: Int
+    }
+}
+
+extension Color {
+    /// Behind a photo tile until its image arrives.
+    static let tilePlaceholder = Color(white: 0.12)
+}
+
+extension View {
+    /// Dims a merged frame whose files were cleared, while it waits for Merge again.
+    func dimmedIfMergeMissing(_ shot: ImportModel.Shot?) -> some View {
+        opacity(shot?.mergeMissing == true ? 0.4 : 1)
     }
 }

@@ -8,6 +8,24 @@ public struct FeaturePrint: @unchecked Sendable {
     let observation: VNFeaturePrintObservation
     public let revision: Int
 
+    /// The print as data, to save alongside the preview it came from.
+    public func archived() -> Data? {
+        try? NSKeyedArchiver.archivedData(withRootObject: observation, requiringSecureCoding: true)
+    }
+
+    /// A print saved with `archived()`.
+    public init?(archive: Data, revision: Int) {
+        guard let observation = try? NSKeyedUnarchiver.unarchivedObject(
+            ofClass: VNFeaturePrintObservation.self, from: archive) else { return nil }
+        self.observation = observation
+        self.revision = revision
+    }
+
+    init(observation: VNFeaturePrintObservation, revision: Int) {
+        self.observation = observation
+        self.revision = revision
+    }
+
     public func distance(to other: FeaturePrint) -> Float? {
         guard revision == other.revision else { return nil }
         var d: Float = 0

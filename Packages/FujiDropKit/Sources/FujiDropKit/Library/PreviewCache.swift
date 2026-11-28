@@ -29,6 +29,29 @@ public struct PreviewCache: Sendable {
         directory.appendingPathComponent("\(name)-\(size).jpg")
     }
 
+    /// Analysis saved next to a preview (see `SavedAnalysis`), so reconnecting doesn't redo it.
+    /// Trimmed with its preview; on its own once it's the oldest entry.
+    public enum Sidecar: String, CaseIterable, Sendable {
+        case score, print
+    }
+
+    public func sidecarURL(_ kind: Sidecar, name: String, size: Int64) -> URL {
+        directory.appendingPathComponent("\(name)-\(size).\(kind.rawValue)")
+    }
+
+    /// A saved sidecar, marking it as recently used.
+    public func readSidecar(_ kind: Sidecar, name: String, size: Int64, now: Date = Date()) -> Data? {
+        let u = sidecarURL(kind, name: name, size: size)
+        guard let data = try? Data(contentsOf: u) else { return nil }
+        try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: u.path)
+        return data
+    }
+
+    public func writeSidecar(_ data: Data, _ kind: Sidecar, name: String, size: Int64) {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? data.write(to: sidecarURL(kind, name: name, size: size), options: .atomic)
+    }
+
     /// Returns the cached preview, marking it as recently used.
     public func cachedURL(name: String, size: Int64, now: Date = Date()) -> URL? {
         let u = url(name: name, size: size)
@@ -37,9 +60,11 @@ public struct PreviewCache: Sendable {
         return u
     }
 
-    /// Drops one preview, e.g. one that turned out not to decode, so it's read again.
+    /// Drops one preview, e.g. one that turned out not to decode, so it's read again, with
+    /// its saved analysis.
     public func remove(name: String, size: Int64) {
         try? FileManager.default.removeItem(at: url(name: name, size: size))
+        for kind in Sidecar.allCases { try? FileManager.default.removeItem(at: sidecarURL(kind, name: name, size: size)) }
     }
 
     @discardableResult
@@ -53,6 +78,7 @@ public struct PreviewCache: Sendable {
     // MARK: Housekeeping
 
     public struct Usage: Equatable, Sendable {
+        /// Previews (saved analysis files aren't counted, but their bytes are).
         public var files: Int
         public var bytes: Int64
 
@@ -69,7 +95,7 @@ public struct PreviewCache: Sendable {
 
     public func usage() -> Usage {
         let entries = self.entries()
-        return Usage(files: entries.count, bytes: entries.reduce(0) { $0 + $1.bytes })
+        return Usage(files: entries.filter(\.isPreview).count, bytes: entries.reduce(0) { $0 + $1.bytes })
     }
 
     @discardableResult
@@ -81,20 +107,32 @@ public struct PreviewCache: Sendable {
         var entries = self.entries().sorted { $0.used < $1.used } // oldest first
         var removed = Usage(files: 0, bytes: 0)
         var total = entries.reduce(Int64(0)) { $0 + $1.bytes }
+        var gone = Set<URL>()
 
         func remove(_ e: Entry) {
-            guard (try? FileManager.default.removeItem(at: e.url)) != nil else { return }
-            removed.files += 1
+            guard !gone.contains(e.url), (try? FileManager.default.removeItem(at: e.url)) != nil else { return }
+            gone.insert(e.url)
+            if e.isPreview { removed.files += 1 }
             removed.bytes += e.bytes
             total -= e.bytes
         }
 
         let cutoff = now.addingTimeInterval(-maxAge)
+        let byURL = Dictionary(entries.map { ($0.url, $0) }, uniquingKeysWith: { a, _ in a })
         while let oldest = entries.first, oldest.used < cutoff || total > maxBytes {
             remove(oldest)
+            // A preview's analysis is no use without it.
+            if oldest.isPreview {
+                let base = oldest.url.deletingPathExtension()
+                for kind in Sidecar.allCases {
+                    if let sidecar = byURL[base.appendingPathExtension(kind.rawValue)] { remove(sidecar) }
+                }
+            }
             entries.removeFirst()
         }
-        return PruneResult(removed: removed, remaining: Usage(files: entries.count, bytes: total))
+        entries.removeAll { gone.contains($0.url) }
+        return PruneResult(removed: removed,
+                           remaining: Usage(files: entries.filter(\.isPreview).count, bytes: total))
     }
 
     @discardableResult
@@ -106,6 +144,7 @@ public struct PreviewCache: Sendable {
         let url: URL
         let bytes: Int64
         let used: Date
+        var isPreview: Bool { url.pathExtension == "jpg" }
     }
 
     /// Every cached file, including those in per-camera subfolders.

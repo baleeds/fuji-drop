@@ -18,6 +18,8 @@ struct MomentViewer: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
     @AppStorage("showGroupingDetails") private var showDetails = false
+    /// Face close-ups in place of the filmstrip.
+    @AppStorage("showFaces") private var showFaces = false
     /// The frame shown (the first pane in compare). Nil until you move: follows the moment's
     /// hero, which can change as scores arrive.
     @State private var current: String?
@@ -33,7 +35,12 @@ struct MomentViewer: View {
         // Only the frames still on the card (after reconnecting, some may be gone), as the
         // moment is now (a merge adds its HDR frame).
         let frames = model.onCard(model.liveMoment(ids))
-        if frames.isEmpty { NotOnCardView() } else { viewer(frames) }
+        Group {
+            if frames.isEmpty { NotOnCardView() } else { viewer(frames) }
+        }
+        // Score this moment's frames first: the suggestion and the faces depend on it.
+        .task(id: ids) { model.prioritizeScoring(ids) }
+        .onDisappear { model.endScoringPriority(ids) }
     }
 
     @ViewBuilder private func viewer(_ ids: [String]) -> some View {
@@ -55,13 +62,13 @@ struct MomentViewer: View {
                 pane(shown, ranking: ranking, comparing: false)
             }
             if ids.count > 1 {
-                Filmstrip(model: model, ids: ids, current: shown, challenger: other,
-                          suggested: ranking?.suggested) { id in
-                    if other != nil {
-                        if id != shown { challenger = id }
-                    } else {
-                        current = id
-                    }
+                let select = { (id: String) in self.select(id, shown: shown, comparing: other != nil) }
+                if showFaces {
+                    FacesPanel(model: model, ids: ids, current: shown, challenger: other,
+                               suggested: ranking?.suggested, select: select)
+                } else {
+                    Filmstrip(model: model, ids: ids, current: shown, challenger: other,
+                              suggested: ranking?.suggested, select: select)
                 }
             }
         }
@@ -99,12 +106,29 @@ struct MomentViewer: View {
             }
             if ids.count > 1 {
                 Button {
+                    showFaces.toggle()
+                } label: {
+                    Image(systemName: showFaces ? "person.crop.square.fill" : "person.crop.square")
+                }
+                .accessibilityLabel(showFaces ? "Show filmstrip" : "Show faces")
+                .accessibilityHint("Lines up each person's face across the moment's frames")
+                Button {
                     challenger = other == nil ? model.challenger(for: shown, in: ids, ranking: ranking) : nil
                 } label: {
                     Label(other == nil ? "Compare" : "Done", systemImage: "square.split.1x2")
                         .labelStyle(.titleAndIcon)
                 }
             }
+        }
+    }
+
+    /// A tap in the filmstrip or faces panel: show the frame, or in compare put it in the
+    /// second pane.
+    private func select(_ id: String, shown: String, comparing: Bool) {
+        if !comparing {
+            current = id
+        } else if id != shown {
+            challenger = id
         }
     }
 
@@ -234,7 +258,35 @@ private struct ViewerPane: View {
                 Image(uiImage: thumbnail).resizable().scaledToFit()
             }
         }
+        .dimmedIfMergeMissing(shot)
         .clipped()
+        .overlay {
+            if let shot, shot.mergeMissing, let sources = shot.mergedFrom {
+                mergeAgain(sources)
+            }
+        }
+    }
+
+    /// Over a merged frame whose files were cleared: rebuild it only when asked.
+    @ViewBuilder private func mergeAgain(_ sources: [String]) -> some View {
+        if case .running = model.merging[model.mergeKey(sources)] {
+            EmptyView() // progress shows at the top of the viewer
+        } else {
+            VStack(spacing: 10) {
+                Text("This merged photo was cleared from storage.")
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Button {
+                    model.merge(sources)
+                } label: {
+                    Label("Merge again", systemImage: "square.3.layers.3d")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(14)
+            .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+            .foregroundStyle(.white)
+        }
     }
 
     var body: some View {
@@ -364,25 +416,55 @@ private struct PaneMarker: View {
     }
 }
 
-/// Every frame of the moment, with selection (top-left) and suggestion (top-right) marks.
-/// Under each thumbnail: a bar for the frame shown, or in compare which pane it's in.
-/// Tap to show a frame (or, in compare, to put it in the second pane).
-private struct Filmstrip: View {
+/// Under a frame in the filmstrip or faces panel, off the photo where it's always visible:
+/// in compare which pane it's in, whether it's saving (blue) or saved (green), and a star
+/// for the suggested frame. The frame on screen is shown by its outline.
+private struct FrameMarker: View {
+    let id: String
+    let current: String
+    let challenger: String?
+    let suggested: String?
+    let selection: SelectionCircle.Kind
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if challenger != nil {
+                if id == current { PaneMarker(pane: 0) } else if id == challenger { PaneMarker(pane: 1) }
+            }
+            if selection != .unselected {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white, selection.color)
+            }
+            if id == suggested {
+                Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(.yellow)
+            }
+        }
+        .frame(height: 16)
+    }
+}
+
+/// The moment's frames in a row (the filmstrip, or the faces panel's columns): scrolls to
+/// the frame on screen, outlines it (solid: shown or compare's top pane; dashed: the bottom
+/// pane) and marks each frame underneath. Every other frame stays at full strength so they
+/// compare fairly. Tap a frame to show it (in compare, to put it in the second pane).
+private struct FrameStrip<Cell: View>: View {
     @ObservedObject var model: ImportModel
     let ids: [String]
     let current: String
     let challenger: String?
     let suggested: String?
     let select: (String) -> Void
+    /// Extra spoken detail for a frame (e.g. its faces).
+    var detail: (String) -> [String] = { _ in [] }
+    @ViewBuilder let cell: (String) -> Cell
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+                LazyHStack(alignment: .top, spacing: 2) {
                     ForEach(ids, id: \.self) { id in
-                        thumbnail(id)
-                            .id(id)
-                            .onTapGesture { select(id) }
+                        frame(id).id(id)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -394,72 +476,172 @@ private struct Filmstrip: View {
         .background(.black)
     }
 
-    private func thumbnail(_ id: String) -> some View {
+    private func frame(_ id: String) -> some View {
         VStack(spacing: 5) {
-            image(id)
-            marker(id).frame(height: 16)
+            cell(id)
+            FrameMarker(id: id, current: current, challenger: challenger, suggested: suggested,
+                        selection: model.selectionState(id))
         }
-        .opacity(id == current || id == challenger ? 1 : 0.65)
+        .padding(4)
+        .overlay {
+            if id == current {
+                RoundedRectangle(cornerRadius: 9).strokeBorder(.white, lineWidth: 2.5)
+            } else if id == challenger {
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(.white, style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { select(id) }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel(id))
+        .accessibilityLabel(label(id))
         .accessibilityAddTraits(.isButton)
     }
 
-    @ViewBuilder private func marker(_ id: String) -> some View {
-        if challenger != nil {
-            if id == current {
-                PaneMarker(pane: 0)
-            } else if id == challenger {
-                PaneMarker(pane: 1)
-            }
-        } else if id == current {
-            Capsule().fill(.white).frame(width: 18, height: 3)
-        }
-    }
-
-    private func accessibilityLabel(_ id: String) -> String {
-        var parts = ["Frame \((ids.firstIndex(of: id) ?? 0) + 1)"]
+    private func label(_ id: String) -> String {
+        var parts = ["Frame \((ids.firstIndex(of: id) ?? 0) + 1)"] + detail(id)
         if challenger != nil, id == current { parts.append("top pane") }
         if id == challenger { parts.append("bottom pane") }
         if challenger == nil, id == current { parts.append("shown") }
         if id == suggested { parts.append("suggested") }
         if model.shots[id]?.isMerged == true { parts.append("HDR") }
-        if model.isSelected(id) { parts.append("selected") }
+        if model.isSelected(id) { parts.append(model.isSaved(id) ? "saved" : "saving") }
         return parts.joined(separator: ", ")
     }
+}
 
-    private func image(_ id: String) -> some View {
-        PreviewImage(shot: model.shots[id])
-            .frame(width: 64, height: 64)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(alignment: .topTrailing) {
-                if id == suggested {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.yellow)
-                        .shadow(color: .black.opacity(0.6), radius: 1)
-                        .padding(4)
+/// Every frame of the moment as a thumbnail.
+private struct Filmstrip: View {
+    @ObservedObject var model: ImportModel
+    let ids: [String]
+    let current: String
+    let challenger: String?
+    let suggested: String?
+    let select: (String) -> Void
+
+    var body: some View {
+        FrameStrip(model: model, ids: ids, current: current, challenger: challenger,
+                   suggested: suggested, select: select) { id in
+            PreviewImage(shot: model.shots[id])
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .bottom) {
+                    if model.shots[id]?.isMerged == true {
+                        Text("HDR")
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .background(.black.opacity(0.6), in: Capsule())
+                            .padding(3)
+                    }
                 }
+        }
+    }
+}
+
+/// Each person's face in every frame of the moment, one row per person and one column per
+/// frame, so the frame where everyone looks good stands out (Faces, in place of the filmstrip).
+/// Closed eyes are marked.
+private struct FacesPanel: View {
+    @ObservedObject var model: ImportModel
+    let ids: [String]
+    let current: String
+    let challenger: String?
+    let suggested: String?
+    let select: (String) -> Void
+
+    var body: some View {
+        let rows = model.faceRows(ids)
+        let column = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, $0) })
+        let size: CGFloat = rows.count > 2 ? 74 : 100
+        if rows.isEmpty {
+            let pending = ids.filter { if case .pending = model.faceStatus($0) { true } else { false } }.count
+            Text(pending > 0 ? "Finding faces… \(ids.count - pending) of \(ids.count) frames" : "No faces in this moment")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 90)
+                .background(.black)
+        } else {
+            FrameStrip(model: model, ids: ids, current: current, challenger: challenger,
+                       suggested: suggested, select: select,
+                       detail: { id in detail(rows.map { $0[column[id] ?? 0] }, id: id) }) { id in
+                FacesColumn(url: model.shots[id]?.previewURL, faces: rows.map { $0[column[id] ?? 0] },
+                            status: model.faceStatus(id), size: size)
             }
-            .overlay(alignment: .bottom) {
-                if model.shots[id]?.isMerged == true {
-                    Text("HDR")
-                        .font(.system(size: 9, weight: .heavy))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4)
-                        .background(.black.opacity(0.6), in: Capsule())
-                        .padding(3)
-                }
+        }
+    }
+
+    private func detail(_ faces: [FaceBox?], id: String) -> [String] {
+        switch model.faceStatus(id) {
+        case .pending: return ["still finding faces"]
+        case .unavailable: return ["faces not measured"]
+        case .measured:
+            var parts: [String] = []
+            let closed = faces.compactMap { $0 }.filter { $0.eyesClosed() }.count
+            let missing = faces.filter { $0 == nil }.count
+            if closed > 0 { parts.append(closed == 1 ? "1 person's eyes closed" : "\(closed) people's eyes closed") }
+            if missing > 0 { parts.append(missing == 1 ? "1 face not found" : "\(missing) faces not found") }
+            return parts
+        }
+    }
+}
+
+/// One frame's close-ups, one per person, loaded together (one decode of the preview).
+private struct FacesColumn: View {
+    let url: URL?
+    let faces: [FaceBox?]
+    let status: ImportModel.FaceStatus
+    let size: CGFloat
+    @Environment(\.displayScale) private var displayScale
+    @State private var loaded: (key: CropKey, images: [UIImage?])?
+
+    private struct CropKey: Equatable {
+        let url: URL?
+        let rects: [CGRect?]
+        let pixels: Int
+    }
+
+    var body: some View {
+        let key = CropKey(url: url, rects: faces.map { $0?.rect },
+                          pixels: PreviewImageLoader.bucket(Int(size * displayScale)))
+        let images = loaded?.key == key ? loaded?.images : nil
+        VStack(spacing: 4) {
+            ForEach(faces.indices, id: \.self) { p in
+                tile(faces[p], image: images?[p])
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-            .overlay(alignment: .topLeading) {
-                let state = model.selectionState(id)
-                if state != .unselected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white, state == .saved ? .green : .blue)
-                        .padding(3)
-                }
+        }
+        .task(id: key) {
+            guard let url, key.rects.contains(where: { $0 != nil }) else { return }
+            let images = await PreviewImageLoader.shared.faceCrops(url: url, rects: key.rects, pixels: key.pixels)
+            loaded = (key, images)
+        }
+    }
+
+    /// A close-up; a spinner while the frame is measured; a question mark where the person
+    /// wasn't found; plain where the frame was never measured.
+    private func tile(_ face: FaceBox?, image: UIImage?) -> some View {
+        ZStack {
+            Color.tilePlaceholder
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if face == nil, case .pending = status {
+                ProgressView().controlSize(.small).tint(.white)
+            } else if face == nil, case .measured = status {
+                Image(systemName: "person.fill.questionmark").foregroundStyle(.white.opacity(0.3))
             }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if face?.eyesClosed() == true {
+                Image(systemName: "eye.slash.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(3)
+                    .background(.orange, in: Circle())
+                    .padding(3)
+            }
+        }
     }
 }
 

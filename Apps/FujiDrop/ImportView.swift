@@ -105,11 +105,23 @@ extension View {
     }
 }
 
-/// The selection control in a photo's top-left corner: an empty ring, blue once selected
-/// (saving), green once it's in Photos. `count` above 1 shows how many frames of a moment
-/// are selected.
+/// The save control in a photo's top-left corner: an empty ring, blue once tapped (saving),
+/// green once it's in Photos. `count` above 1 shows how many frames of a moment are saved.
+/// Shown to people as "saved": tapping saves to Photos, and un-tapping a saved frame asks
+/// to delete it from Photos.
 struct SelectionCircle: View {
-    enum Kind { case unselected, selected, saved }
+    enum Kind {
+        case unselected, selected, saved
+
+        /// Blue while saving, green once in Photos (also used under filmstrip frames).
+        var color: Color {
+            switch self {
+            case .unselected: return .black.opacity(0.25)
+            case .selected: return .blue
+            case .saved: return .green
+            }
+        }
+    }
 
     let state: Kind
     var count = 0
@@ -118,7 +130,7 @@ struct SelectionCircle: View {
     var body: some View {
         Button(action: toggle) {
             ZStack {
-                Circle().fill(fill)
+                Circle().fill(state.color)
                 Circle().strokeBorder(.white, lineWidth: 2)
                 if state != .unselected {
                     if count > 1 {
@@ -139,19 +151,11 @@ struct SelectionCircle: View {
         .accessibilityAddTraits(state == .unselected ? [] : .isSelected)
     }
 
-    private var fill: Color {
-        switch state {
-        case .unselected: return .black.opacity(0.25)
-        case .selected: return .blue
-        case .saved: return .green
-        }
-    }
-
     private var label: String {
         switch state {
-        case .unselected: return "Select"
-        case .selected: return count > 1 ? "\(count) selected, saving" : "Selected, saving"
-        case .saved: return count > 1 ? "\(count) selected, in Photos" : "Selected, in Photos"
+        case .unselected: return "Save to Photos"
+        case .selected: return count > 1 ? "\(count) saved, still saving" : "Saving to Photos"
+        case .saved: return count > 1 ? "\(count) saved in Photos" : "Saved in Photos"
         }
     }
 }
@@ -261,7 +265,7 @@ private struct DayCollage: View {
     private var subtitle: String {
         let shots = day.shotIDs.count == 1 ? "1 shot" : "\(day.shotIDs.count) shots"
         let selected = model.selected(in: day.shotIDs).count
-        return [shots, selected > 0 ? "\(selected) selected" : nil, model.dayTimeSpan(day)]
+        return [shots, selected > 0 ? "\(selected) saved" : nil, model.dayTimeSpan(day)]
             .compactMap { $0 }.joined(separator: " · ")
     }
 }
@@ -272,15 +276,20 @@ private struct MomentsFeed: View {
     @ObservedObject var model: ImportModel
     let dayID: String
     @Binding var showSettings: Bool
+    /// Only moments with a saved frame: a last look at the day's picks.
+    @State private var savedOnly = false
 
     var body: some View {
         if model.hasDay(dayID) { feed } else { NotOnCardView() }
     }
 
     private var feed: some View {
-        ScrollView {
+        // Merged HDR frames are in the moments but not in the day's order.
+        let savedCount = model.selected(in: model.moments.flatMap { $0 }).count
+        let moments = savedOnly ? model.moments.filter { !model.selected(in: $0).isEmpty } : model.moments
+        return ScrollView {
             LazyVStack(spacing: 3) {
-                ForEach(model.moments, id: \.first) { ids in
+                ForEach(moments, id: \.first) { ids in
                     NavigationLink(value: MomentRef(ids: ids)) {
                         MomentTile(model: model, ids: ids)
                     }
@@ -302,12 +311,20 @@ private struct MomentsFeed: View {
         .navigationTitle(model.days.first { $0.id == dayID }?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            let selected = model.selected(in: model.order).count
-            if selected > 0 {
-                Text("\(selected) selected").font(.subheadline).foregroundStyle(.secondary)
+            if savedCount > 0 || savedOnly {
+                Button {
+                    savedOnly.toggle()
+                } label: {
+                    Label("\(savedCount) saved",
+                          systemImage: savedOnly ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                        .labelStyle(.titleAndIcon)
+                }
+                .accessibilityHint(savedOnly ? "Shows every moment again" : "Shows only moments with saved photos")
             }
             SettingsButton(showSettings: $showSettings)
         }
+        // Nothing left to show: back to every moment.
+        .onChange(of: savedCount) { if savedCount == 0 { savedOnly = false } }
         .onAppear { if model.selectedDayID != dayID { model.select(dayID: dayID) } }
     }
 

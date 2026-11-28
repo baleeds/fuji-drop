@@ -18,6 +18,10 @@ Branch: `main` (the trunk since Nov 27, 2026; it replaced `claude/optimistic-mei
   don't matter. The RAF must be the Photos editing base (done; shows as "RAW+JPEG").
 - Wants a **photo-first UI**: big images, minimal metadata and controls.
 - **Grouping defaults are confirmed** (burst 3 s, split Δ > 0.6, join 180 s / Δ < 0.3).
+  They're the **Balanced** preset in Settings › Moments (Fewer / Balanced / More,
+  `MomentGrouper.Preset`, kept in `grouping.v1`); Fewer and More are first guesses either side.
+- Shown to people as **"saved"**, not "selected": tapping the circle saves to Photos. The day's
+  toolbar "N saved" button filters the day to moments with saved frames.
 
 ## Build and run on the Mac
 
@@ -28,7 +32,10 @@ swift test --package-path Packages/FujiDropKit
 ```
 
 Install/launch on the iPhone over Wi-Fi with `xcrun devicectl` (list devices with
-`xcrun devicectl list devices`). The camera can only be tested on the phone, by the owner.
+`xcrun devicectl list devices`). **Install Release builds on the phone**
+(`-configuration Release`): Debug compiles Swift with `-Onone` and LibRaw with `-O0`, and the
+pixel loops (sharpness, LibRaw, HDR merge, DNG writing) run many times slower, enough to heat
+the phone. Debug is only for stepping through code in Xcode. The camera can only be tested on the phone, by the owner.
 The app's log mirrors to the console under subsystem `FujiDrop`, and to Settings › Log in the app.
 
 ## Layout
@@ -111,7 +118,10 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
    (focus 55 %, aesthetics 25 %, faces 20 % when any frame has one). The feed's hero is the
    suggested pick once all frames are scored; the detail view stars it. Turn on "Show grouping
    details" to see each part of the score, and calibrate the weights on real bursts. Scores
-   aren't cached on disk yet (recomputed each connect, ~0.1–0.3 s per shot expected).
+   and feature prints are saved next to each cached preview (`PreviewCache` sidecars,
+   `SavedAnalysis`), thrown away when iOS changes or its version is bumped: bump
+   `scoreVersion` whenever what `ShotScorer` measures changes, `printVersion` for `FeaturePrinter`. The moment on screen is scored
+   first (`prioritizeScoring`). Face close-ups (Faces button in the viewer) use the saved boxes.
 2. ~~Compare screen~~ (built Nov 27, 2026, **not yet checked on device**): Compare in a moment's
    detail view (toolbar, or long-press a frame) opens two frames with zoom/pan locked together
    (`ZoomGroup` in `Zoomable.swift`). Winner stays: top/left is the favourite, bottom/right the
@@ -145,4 +155,8 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
      each save's format.
    - HDR: brackets get a "Bracket" label and skip ranking; Merge in the viewer adds an "HDR"
      frame that compares, selects and saves like any other (DNG + JPEG).
+     Merges are disposable (`Caches/Merges`, 8 kept, iOS may clear them) and are **never
+     started automatically**: only Merge, Retry and Merge again call `ImportModel.merge`. A
+     merged frame whose files are gone shows dimmed with Merge again; a selected one waits
+     to save until it's merged again (`SaveError.needsMerge`).
    - Settings › Acknowledgements has LibRaw's notice.

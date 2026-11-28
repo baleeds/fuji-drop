@@ -87,10 +87,11 @@ final class SaveQueue: ObservableObject {
     }
 
     private enum SaveError: LocalizedError {
-        case notOnCard, downloadFailed
+        case notOnCard, downloadFailed, needsMerge
         var errorDescription: String? {
             switch self {
             case .notOnCard: return "No longer on the card"
+            case .needsMerge: return "The merged photo was cleared: merge it again to save it"
             case .downloadFailed: return "Couldn't download the RAW file"
             }
         }
@@ -124,6 +125,14 @@ final class SaveQueue: ObservableObject {
         .filter { !pending.contains($0) }
         guard !items.isEmpty else { return }
         pending += items
+        // Queued again after failing (e.g. merged again after its merge was cleared): forget
+        // the failed attempt, so the bar doesn't still report it once this one saves.
+        let requeued = Set(items.map(\.id))
+        if let stale = progress?.failures.filter({ requeued.contains($0.id) }).count, stale > 0 {
+            progress?.failures.removeAll { requeued.contains($0.id) }
+            progress?.done -= stale
+            progress?.total -= stale
+        }
 
         switch progress?.state {
         case .running:
@@ -241,6 +250,10 @@ final class SaveQueue: ObservableObject {
         // Saved meanwhile (e.g. by a stopped run finishing it): nothing to do.
         guard !model.isSaved(item.id) || model.shots[item.id]?.key != item.key else { return }
         let started = Date()
+        // A merged frame whose files were cleared waits for Merge again (never merged here).
+        if let sources = model.shots[item.id]?.mergedFrom, await model.mergedEntry(sources) == nil {
+            throw SaveError.needsMerge
+        }
         // Waits out an unplug; nil means it failed or the file is gone.
         guard let cached = await model.rawURL(item.id) else {
             try Task.checkCancellation()
@@ -272,7 +285,7 @@ final class SaveQueue: ObservableObject {
         let jpeg: URL, raw: URL, format: SaveFormat
         if let sources = shot.mergedFrom {
             // A merged HDR frame: its DNG and the JPEG the merge rendered.
-            guard let entry = await model.mergedEntry(sources) else { throw SaveError.downloadFailed }
+            guard let entry = await model.mergedEntry(sources) else { throw SaveError.needsMerge }
             (jpeg, raw, format) = (try local(entry.jpeg), try local(entry.dng), .hdr)
         } else if SaveFormat.current == .dng, model.fujiCamera.supportsXTransProcessing {
             // LibRaw decode → linear DNG + a JPEG from the same pixels.

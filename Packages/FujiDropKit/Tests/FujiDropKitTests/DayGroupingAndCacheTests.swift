@@ -64,6 +64,35 @@ final class PreviewCacheTests: XCTestCase {
         XCTAssertNotNil(cache.cachedURL(name: "c", size: 100))
     }
 
+    func testSidecarsAreTrimmedWithTheirPreviewAndNotCounted() throws {
+        let now = Date()
+        try put("a", bytes: 100, daysAgo: 3, now: now)
+        try put("b", bytes: 100, daysAgo: 1, now: now)
+        cache.writeSidecar(Data(count: 10), .score, name: "a", size: 100)
+        cache.writeSidecar(Data(count: 10), .print, name: "a", size: 100)
+        cache.writeSidecar(Data(count: 10), .score, name: "b", size: 100)
+        XCTAssertEqual(cache.readSidecar(.score, name: "a", size: 100), Data(count: 10))
+        XCTAssertEqual(cache.usage(), .init(files: 2, bytes: 230))
+
+        // Over the cap: "a" is the oldest preview, and its sidecars go with it (even though
+        // reading one just made it recent).
+        let result = cache.prune(maxBytes: 150, maxAge: 30 * 86400, now: now)
+
+        XCTAssertEqual(result.removed, .init(files: 1, bytes: 120))
+        XCTAssertEqual(result.remaining, .init(files: 1, bytes: 110))
+        XCTAssertNil(cache.readSidecar(.score, name: "a", size: 100))
+        XCTAssertNil(cache.readSidecar(.print, name: "a", size: 100))
+        XCTAssertNotNil(cache.readSidecar(.score, name: "b", size: 100))
+    }
+
+    func testRemoveDropsSidecars() throws {
+        try cache.store(Data(count: 5), name: "a", size: 5)
+        cache.writeSidecar(Data(count: 1), .score, name: "a", size: 5)
+        cache.remove(name: "a", size: 5)
+        XCTAssertNil(cache.cachedURL(name: "a", size: 5))
+        XCTAssertNil(cache.readSidecar(.score, name: "a", size: 5))
+    }
+
     func testCacheHitProtectsEntryFromEviction() throws {
         let now = Date()
         try put("a", bytes: 100, daysAgo: 3, now: now)

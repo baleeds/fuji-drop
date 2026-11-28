@@ -2,7 +2,8 @@ import FujiDropKit
 import SwiftUI
 import UIKit
 
-/// Live controls for the moment-grouping thresholds. Changes regroup immediately.
+/// Settings. Moment grouping is a preset (Fewer / Balanced / More moments); the thresholds
+/// behind it show with "Show grouping details". Changes regroup the open day immediately.
 struct TuningView: View {
     @Binding var grouper: MomentGrouper
     let camera: FujiCamera
@@ -20,28 +21,19 @@ struct TuningView: View {
         NavigationStack {
             Form {
                 Section {
-                    row("Burst gap", value: $grouper.burstGap, range: 0.5...10, step: 0.5, format: "%.1f s")
-                    row("Split above Δ", value: float($grouper.splitDistance), range: 0.1...1.5, step: 0.05, format: "%.2f")
-                } header: {
-                    Text("Frames close in time")
-                } footer: {
-                    Text("Frames within the burst gap stay together unless they look more different than the split distance.")
-                }
-                Section {
-                    row("Join gap", value: $grouper.joinGap, range: 10...900, step: 10, format: "%.0f s")
-                    row("Join below Δ", value: float($grouper.joinDistance), range: 0.05...1.0, step: 0.05, format: "%.2f")
-                } header: {
-                    Text("Frames further apart")
-                } footer: {
-                    Text("Frames up to the join gap apart rejoin a moment only if they look this similar.")
-                }
-                Section {
+                    Picker("Moments", selection: preset) {
+                        Text("Fewer").tag(MomentGrouper.Preset?.some(.fewer))
+                        Text("Balanced").tag(MomentGrouper.Preset?.some(.balanced))
+                        Text("More").tag(MomentGrouper.Preset?.some(.more))
+                    }
+                    .pickerStyle(.segmented)
                     Toggle("Show grouping details", isOn: $showDetails)
-                    Button("Reset to defaults") { grouper = MomentGrouper() }
-                    LabeledContent("Current", value: summary).font(.caption.monospaced())
+                } header: {
+                    Text("Moments")
                 } footer: {
-                    Text("Details show each frame's file name, time gap and visual distance (Δ) from the previous frame.")
+                    Text(presetDescription)
                 }
+                if showDetails { details }
                 if camera.supportsXTransProcessing {
                     savingSection
                 } else {
@@ -61,7 +53,7 @@ struct TuningView: View {
                 } header: {
                     Text("Storage")
                 } footer: {
-                    Text("Previews are kept so reconnecting is instant. Ones unused for 30 days are removed automatically, and the total is capped at 500 MB. iOS may also clear them when storage is low.")
+                    Text("Previews and each shot's analysis (grouping, scores, faces) are kept so reconnecting is instant. Clearing them makes everything be read and measured again. Ones unused for 30 days are removed automatically, and the total is capped at 500 MB. iOS may also clear them when storage is low.")
                 }
                 Section {
                     NavigationLink("Log (\(log.count))") { LogView(log: log) }
@@ -95,6 +87,47 @@ struct TuningView: View {
             Text(saveFormat == .raf
                  ? "Saves the camera's RAF with a JPEG, as Photos imports from a camera."
                  : "Converts each photo on the phone (a few seconds): sharper fine detail and less false colour than Apple's RAW engine, with a JPEG from the same conversion. Photos keeps one RAW per photo, so the RAF isn't in Photos; turn on Also keep RAF files to copy originals to Fuji Drop's folder in the Files app. Fujifilm camera profiles in Lightroom may not apply to the DNG.")
+        }
+    }
+
+    /// The thresholds behind the presets, for fine-tuning ("Custom" when they match none).
+    @ViewBuilder private var details: some View {
+        Section {
+            row("Burst gap", value: $grouper.burstGap, range: 0.5...10, step: 0.5, format: "%.1f s")
+            row("Split above Δ", value: float($grouper.splitDistance), range: 0.1...1.5, step: 0.05, format: "%.2f")
+        } header: {
+            Text(grouper.preset == nil ? "Custom: frames close in time" : "Frames close in time")
+        } footer: {
+            Text("Frames within the burst gap stay together unless they look more different than the split distance.")
+        }
+        Section {
+            row("Join gap", value: $grouper.joinGap, range: 10...900, step: 10, format: "%.0f s")
+            row("Join below Δ", value: float($grouper.joinDistance), range: 0.05...1.0, step: 0.05, format: "%.2f")
+        } header: {
+            Text("Frames further apart")
+        } footer: {
+            Text("Frames up to the join gap apart rejoin a moment only if they look this similar.")
+        }
+        Section {
+            Button("Reset to Balanced") { grouper = MomentGrouper(preset: .balanced) }
+            LabeledContent("Current", value: summary).font(.caption.monospaced())
+        } footer: {
+            Text("Details also show each frame's file name, time gap and visual distance (Δ) from the previous frame.")
+        }
+    }
+
+    /// The preset the grouping matches; nil (no segment) for custom values from the sliders.
+    private var preset: Binding<MomentGrouper.Preset?> {
+        Binding(get: { grouper.preset },
+                set: { if let p = $0 { grouper = MomentGrouper(preset: p) } })
+    }
+
+    private var presetDescription: String {
+        switch grouper.preset {
+        case .fewer: return "Groups generously: bursts and retakes of the same scene become one moment."
+        case .balanced: return "Bursts and close retakes are one moment; a new scene starts a new one."
+        case .more: return "Splits finely: similar shots seconds apart stay separate moments."
+        case nil: return "Custom grouping from the sliders below. Pick a preset to go back."
         }
     }
 

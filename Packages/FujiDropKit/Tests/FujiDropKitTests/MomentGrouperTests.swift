@@ -45,3 +45,34 @@ final class MomentGrouperTests: XCTestCase {
         XCTAssertEqual(group([]), [])
     }
 }
+
+final class MomentGrouperPresetTests: XCTestCase {
+    func testDefaultIsBalanced() {
+        XCTAssertEqual(MomentGrouper().preset, .balanced)
+        XCTAssertEqual(MomentGrouper(preset: .balanced), MomentGrouper())
+    }
+
+    func testPresetsRoundTripAndCustomIsNil() {
+        for preset in MomentGrouper.Preset.allCases {
+            XCTAssertEqual(MomentGrouper(preset: preset).preset, preset)
+        }
+        var custom = MomentGrouper()
+        custom.burstGap = 4
+        XCTAssertNil(custom.preset)
+    }
+
+    func testFewerGroupsMoreThanMore() {
+        // Frames 4 s apart with a moderate visual difference.
+        let dates = (0..<6).map { Date(timeIntervalSince1970: Double($0) * 4) }
+        let distance: (Int, Int) -> Float? = { _, _ in 0.35 }
+        let fewer = MomentGrouper(preset: .fewer).group(Array(dates.indices), date: { dates[$0] }, distance: distance)
+        let more = MomentGrouper(preset: .more).group(Array(dates.indices), date: { dates[$0] }, distance: distance)
+        XCTAssertLessThan(fewer.count, more.count)
+    }
+
+    func testSavesAndLoads() throws {
+        let grouper = MomentGrouper(preset: .more)
+        let data = try JSONEncoder().encode(grouper)
+        XCTAssertEqual(try JSONDecoder().decode(MomentGrouper.self, from: data), grouper)
+    }
+}

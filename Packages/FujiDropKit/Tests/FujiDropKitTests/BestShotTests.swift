@@ -112,8 +112,9 @@ final class BestShotTests: XCTestCase {
 
     func testClosedEyesFlaggedAndPenalised() {
         // Equally sharp; closed eyes should lose even with a slightly better face score.
-        let scores = [ShotScore(sharpness: 100, faceQuality: 0.6, eyeOpenness: 0.08),
-                      ShotScore(sharpness: 100, faceQuality: 0.55, eyeOpenness: 0.32)]
+        let face = CGRect(x: 0.4, y: 0.3, width: 0.1, height: 0.12)
+        let scores = [ShotScore(sharpness: 100, faceQuality: 0.6, faces: [FaceBox(rect: face, eyeOpenness: 0.08)]),
+                      ShotScore(sharpness: 100, faceQuality: 0.55, faces: [FaceBox(rect: face, eyeOpenness: 0.32)])]
         let ranked = BestShot.rank(scores)
         XCTAssertEqual(ranked[0].flaws, [.eyesClosed])
         XCTAssertEqual(ranked[1].flaws, [])
