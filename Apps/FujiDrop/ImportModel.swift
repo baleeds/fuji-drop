@@ -100,6 +100,8 @@ final class ImportModel: ObservableObject {
     /// The session's camera. Kept while unplugged; changes when the session ends (nil) or a
     /// different camera replaces it, which is when views return to the root.
     @Published private(set) var cameraID: String?
+    /// The session's body: decides whether DNG saves and HDR merges are offered.
+    var fujiCamera: FujiCamera { FujiCamera(name: cameraID) }
     private var cameraObservation: AnyCancellable?
 
     @Published private(set) var days: [Day] = []

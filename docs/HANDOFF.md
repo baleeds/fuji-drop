@@ -75,6 +75,17 @@ cooperative thread pool. Commit `10780b0` moved it to GCD queues (`Apps/FujiDrop
   the session and returns to Connect. Previews are cached per camera (`PreviewCache.scoped`).
 - Picks are keyed by `Shot.key` (`picks.v2` in UserDefaults; earlier picks were dropped).
 
+## Other Fujifilm bodies (Nov 27, 2026, only the X-T1 tested)
+
+- Fuji only: shots are `.RAF` files, previews come from the RAF header. Other brands connect but
+  show "No Fujifilm RAW files".
+- `FujiCamera` (from `cameraID`, the model name) knows the sensor: Bayer bodies (X-A, X-T100/200,
+  X100, XF10, GFX) get RAF saves only; DNG and Merge are hidden. Unknown names count as X-Trans.
+  `XTransDecoder` refuses non-X-Trans files itself (`filters != 9`) as a backstop.
+- 40 MP bodies (X-T5, X-T50, X-H2, X100VI, X-E5) decode to ~240 MB a frame: the merge sheet
+  warns it may run out of memory. Not measured.
+- Newer bodies call the USB mode USB CARD READER; check one connects before relying on it.
+
 ## Gotchas learned the hard way
 
 - Apple's RAW engine renders X-T1 RAFs 1–2 stops dark when the camera used DR200/DR400 (Fuji

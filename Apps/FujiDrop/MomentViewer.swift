@@ -86,7 +86,8 @@ struct MomentViewer: View {
         .toolbarBackground(.black, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
-            if let bracket = bracket(ids, shown: shown), !model.isMerged(bracket),
+            if model.fujiCamera.supportsXTransProcessing,
+               let bracket = bracket(ids, shown: shown), !model.isMerged(bracket),
                model.merging[model.mergeKey(bracket)] == nil {
                 Button {
                     confirming = BracketRef(ids: bracket)
@@ -486,6 +487,13 @@ private struct MergeSheet: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                if model.fujiCamera.isHighResolution {
+                    Label("\(model.fujiCamera.model) frames are large: the merge may run out of memory and close the app.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                }
             }
             HStack(alignment: .top, spacing: 10) {
                 ForEach(frames, id: \.self) { id in

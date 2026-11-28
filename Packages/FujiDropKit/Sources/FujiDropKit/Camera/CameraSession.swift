@@ -75,7 +75,7 @@ public final class CameraSession: NSObject, ObservableObject {
         }
         phase = .searching
         browser.start()
-        record("Browsing for cameras. Connect the X-T1 (USB mode: MTP(PTP)) and turn it on.")
+        record("Browsing for cameras. Connect a Fujifilm camera (USB mode: USB CARD READER, or MTP(PTP) on older bodies) and turn it on.")
     }
 
     public func stop() {

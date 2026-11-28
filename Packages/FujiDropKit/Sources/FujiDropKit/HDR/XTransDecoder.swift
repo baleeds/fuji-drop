@@ -44,6 +44,7 @@ public enum XTransDecoder {
         case libraw(String, Int32)
         case outOfMemory
         case unexpectedFormat(String)
+        case notXTrans(String)
 
         public var errorDescription: String? {
             switch self {
@@ -51,6 +52,7 @@ public enum XTransDecoder {
                 return "LibRaw \(step) failed: \(String(cString: libraw_strerror(code)))"
             case .outOfMemory: return "Not enough memory to decode the RAW file"
             case .unexpectedFormat(let what): return "Unexpected LibRaw output: \(what)"
+            case .notXTrans(let model): return "\(model.isEmpty ? "This camera" : model) doesn't have an X-Trans sensor"
             }
         }
     }
@@ -77,7 +79,11 @@ public enum XTransDecoder {
         let make = withUnsafeBytes(of: idata.make) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
         let model = withUnsafeBytes(of: idata.model) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
         let other = probe.pointee.other
+        // LibRaw marks X-Trans with filters == 9. The demosaic settings, 6-row band alignment
+        // and colour cleanup all assume it, so a Bayer RAW is refused rather than mis-rendered.
+        let isXTrans = idata.filters == 9
         libraw_close(probe)
+        guard isXTrans else { throw DecodeError.notXTrans(model) }
 
         // Bands in sensor rows, each decoded with `overlap` extra rows above and below.
         let n = max(1, min(bands, sensorH / 256))

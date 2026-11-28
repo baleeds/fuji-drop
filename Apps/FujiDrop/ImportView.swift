@@ -46,7 +46,7 @@ private struct ImportContent: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            TuningView(grouper: $model.grouper, cacheUsage: model.cacheUsage, log: camera.log,
+            TuningView(grouper: $model.grouper, camera: model.fujiCamera, cacheUsage: model.cacheUsage, log: camera.log,
                        clearCache: model.clearCache) {
                 showSettings = false
                 model.endSession()
@@ -191,6 +191,12 @@ private struct DaysFeed: View {
 
     var body: some View {
         ScrollView {
+            if model.days.isEmpty, model.connection == .connected {
+                ContentUnavailableView("No Fujifilm RAW files",
+                                       systemImage: "photo.badge.exclamationmark",
+                                       description: Text(emptyMessage))
+                    .padding(.top, 80)
+            }
             LazyVStack(spacing: 14) {
                 ForEach(model.days) { day in
                     NavigationLink(value: DayRef(id: day.id)) {
@@ -203,6 +209,13 @@ private struct DaysFeed: View {
             .padding(.bottom, 16)
         }
         .onAppear { model.loadDaySamples() }
+    }
+
+    private var emptyMessage: String {
+        let skipped = model.skippedNonRAW
+        let other = skipped == 0 ? "The card has no photos." :
+            "The card has \(skipped) other \(skipped == 1 ? "photo" : "photos")."
+        return "Fuji Drop reads RAF files from Fujifilm cameras. \(other)"
     }
 }
 
@@ -359,7 +372,7 @@ private struct ConnectView: View {
                     }
                 }
             }
-            Text("X-T1: USB mode MTP(PTP), connect with a USB-C to micro-USB data cable, turn the camera on.")
+            Text("Fujifilm X cameras: set the USB connection mode to USB CARD READER (MTP(PTP) on older bodies such as the X-T1), plug in with a data cable, and turn the camera on.")
                 .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .padding(32)

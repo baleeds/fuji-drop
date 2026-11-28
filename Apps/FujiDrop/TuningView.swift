@@ -5,6 +5,7 @@ import UIKit
 /// Live controls for the moment-grouping thresholds. Changes regroup immediately.
 struct TuningView: View {
     @Binding var grouper: MomentGrouper
+    let camera: FujiCamera
     let cacheUsage: PreviewCache.Usage
     let log: [CameraSession.LogLine]
     let clearCache: () -> Void
@@ -41,20 +42,16 @@ struct TuningView: View {
                 } footer: {
                     Text("Details show each frame's file name, time gap and visual distance (Δ) from the previous frame.")
                 }
-                Section {
-                    Picker("Save RAW as", selection: $saveFormat) {
-                        Text("RAF (original)").tag(SaveFormat.raf)
-                        Text("DNG (sharper detail)").tag(SaveFormat.dng)
+                if camera.supportsXTransProcessing {
+                    savingSection
+                } else {
+                    Section {
+                        LabeledContent("Save RAW as", value: "RAF (original)")
+                    } header: {
+                        Text("Saving")
+                    } footer: {
+                        Text("Saves the camera's RAF with a JPEG. DNG saving and HDR merges need an X-Trans sensor, which the \(camera.model) doesn't have.")
                     }
-                    if saveFormat == .dng {
-                        Toggle("Also keep RAF files", isOn: $keepRAF)
-                    }
-                } header: {
-                    Text("Saving")
-                } footer: {
-                    Text(saveFormat == .raf
-                         ? "Saves the camera's RAF with a JPEG, as Photos imports from a camera."
-                         : "Converts each photo on the phone (a few seconds): sharper fine detail and less false colour than Apple's RAW engine, with a JPEG from the same conversion. Photos keeps one RAW per photo, so the RAF isn't in Photos; turn on Also keep RAF files to copy originals to Fuji Drop's folder in the Files app. Fujifilm camera profiles in Lightroom may not apply to the DNG.")
                 }
                 Section {
                     LabeledContent("Saved previews",
@@ -80,6 +77,24 @@ struct TuningView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { dismiss() } }
+        }
+    }
+
+    private var savingSection: some View {
+        Section {
+            Picker("Save RAW as", selection: $saveFormat) {
+                Text("RAF (original)").tag(SaveFormat.raf)
+                Text("DNG (sharper detail)").tag(SaveFormat.dng)
+            }
+            if saveFormat == .dng {
+                Toggle("Also keep RAF files", isOn: $keepRAF)
+            }
+        } header: {
+            Text("Saving")
+        } footer: {
+            Text(saveFormat == .raf
+                 ? "Saves the camera's RAF with a JPEG, as Photos imports from a camera."
+                 : "Converts each photo on the phone (a few seconds): sharper fine detail and less false colour than Apple's RAW engine, with a JPEG from the same conversion. Photos keeps one RAW per photo, so the RAF isn't in Photos; turn on Also keep RAF files to copy originals to Fuji Drop's folder in the Files app. Fujifilm camera profiles in Lightroom may not apply to the DNG.")
         }
     }
 

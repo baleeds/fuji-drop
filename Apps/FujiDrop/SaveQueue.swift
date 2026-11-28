@@ -274,7 +274,7 @@ final class SaveQueue: ObservableObject {
             // A merged HDR frame: its DNG and the JPEG the merge rendered.
             guard let entry = await model.mergedEntry(sources) else { throw SaveError.downloadFailed }
             (jpeg, raw, format) = (try local(entry.jpeg), try local(entry.dng), .hdr)
-        } else if SaveFormat.current == .dng {
+        } else if SaveFormat.current == .dng, model.fujiCamera.supportsXTransProcessing {
             // LibRaw decode → linear DNG + a JPEG from the same pixels.
             let rafLink = try local(cached)
             let preview = shot.previewURL, name = shot.id
