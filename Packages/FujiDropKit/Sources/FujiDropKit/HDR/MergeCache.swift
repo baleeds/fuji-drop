@@ -6,6 +6,9 @@ import Foundation
 /// folders beyond `keep` are removed, and a missing merge is rebuilt from the RAFs.
 public struct MergeCache: Sendable {
     public static let defaultKeep = 8
+    /// Bumped when the merge itself changes, so older outputs aren't reused (they're pruned
+    /// like any other). 2: reference-anchored weights (no blending of moving subjects).
+    public static let version = 2
 
     public struct Entry: Sendable, Equatable {
         public var dng: URL
@@ -37,7 +40,7 @@ public struct MergeCache: Sendable {
     }
 
     public func folder(key: String) -> URL {
-        directory.appendingPathComponent(key, isDirectory: true)
+        directory.appendingPathComponent("\(key)-v\(Self.version)", isDirectory: true)
     }
 
     /// The finished merge, marking it as recently used. Nil if missing or incomplete.
@@ -50,12 +53,16 @@ public struct MergeCache: Sendable {
         return e
     }
 
-    /// Removes all but the `keep` most recently used merges.
+    /// Removes merges made by an older version, then all but the `keep` most recently used.
     public func prune(keep: Int = MergeCache.defaultKeep) {
         let keys: [URLResourceKey] = [.contentModificationDateKey, .isDirectoryKey]
         let entries = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? [])
             .compactMap { url -> (URL, Date)? in
                 guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isDirectory == true else { return nil }
+                guard url.lastPathComponent.hasSuffix("-v\(Self.version)") else {
+                    try? FileManager.default.removeItem(at: url)
+                    return nil
+                }
                 return (url, v.contentModificationDate ?? .distantPast)
             }
             .sorted { $0.1 > $1.1 }

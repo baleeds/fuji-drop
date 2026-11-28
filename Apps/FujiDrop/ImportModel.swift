@@ -686,13 +686,17 @@ final class ImportModel: ObservableObject {
     }
 
     /// Finds a finished merge on disk off the main actor (once per bracket), then shows it.
+    /// If it's gone (pruned, or made by an older version of the merge), merges it again.
     private func lookUpMerge(_ ids: [String]) {
         let key = mergeKey(ids), name = mergedID(ids), cache = mergeCache
         guard mergeLookups.insert(key).inserted else { return }
         Task {
-            guard let entry = await Background.decode({ cache.entry(key: key, name: name) }) else { return }
-            mergeEntries[key] = entry
-            if order.contains(ids[0]) { regroup() }
+            if let entry = await Background.decode({ cache.entry(key: key, name: name) }) {
+                mergeEntries[key] = entry
+                if order.contains(ids[0]) { regroup() }
+            } else {
+                merge(ids) // regroups when done
+            }
         }
     }
 

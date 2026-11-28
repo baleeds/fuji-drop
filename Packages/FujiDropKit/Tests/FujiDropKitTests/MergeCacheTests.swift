@@ -27,7 +27,10 @@ final class MergeCacheTests: XCTestCase {
         try make("half", 50, jpeg: false)
         XCTAssertNil(cache.entry(key: "half", name: "X-HDR"))
         XCTAssertNotNil(cache.entry(key: "old", name: "X-HDR")) // now the most recently used
+        let stale = dir.appendingPathComponent("old-v0")
+        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
         cache.prune(keep: 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path)) // older merge version
         XCTAssertNotNil(cache.entry(key: "old", name: "X-HDR"))
         XCTAssertNil(cache.entry(key: "mid", name: "X-HDR"))
         XCTAssertNil(cache.entry(key: "new", name: "X-HDR"))

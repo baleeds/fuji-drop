@@ -96,6 +96,20 @@ final class HDRMergerTests: XCTestCase {
         XCTAssertEqual(Float(m.pixels[(y * w + x) * 3 + 1]) * m.scale, s.y, accuracy: s.y * 0.02)
     }
 
+    /// Midtones come from the reference alone: a subject that moved a little between frames
+    /// (a difference below the ghost threshold) isn't blended in, which left skin blotchy.
+    func testMidtonesComeFromTheReferenceOnly() throws {
+        var bright = frame(stops: 1)
+        // A 0.3-stop change in the midtones: under the ghost threshold.
+        for y in 40..<80 {
+            for x in 120..<160 { for c in 0..<3 { bright.pixels[(y * w + x) * 3 + c] = UInt16(min(65535, Double(bright.pixels[(y * w + x) * 3 + c]) * 1.23)) } }
+        }
+        let m = try HDRMerger.merge([frame(stops: 0), bright, frame(stops: -1)], reference: 0, options: options())
+        let x = 140, y = 60, s = scene(x, y)
+        XCTAssertGreaterThan(s.y, 0.07) // a midtone: within 4 stops of clip
+        XCTAssertEqual(Float(m.pixels[(y * w + x) * 3 + 1]) * m.scale, s.y, accuracy: s.y * 0.005)
+    }
+
     /// A ghost that only changes colour (a leg over ferns, same brightness) is caught too.
     func testColourOnlyGhostIsRemoved() throws {
         var bright = frame(stops: 1)

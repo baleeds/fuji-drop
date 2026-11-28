@@ -83,7 +83,7 @@ public enum XTransDecoder {
         let n = max(1, min(bands, sensorH / 256))
         let overlap = 24 // a multiple of 6; Markesteijn's border handling needs well under this
         var sensor = [UInt16](repeating: 0, count: sensorW * sensorH * 3)
-        var color: libraw_colordata_t?
+        var color: (wb: [Float], camXYZ: [Float])?
         var failure: Error?
         let lock = NSLock()
         sensor.withUnsafeMutableBufferPointer { out in
@@ -117,7 +117,8 @@ public enum XTransDecoder {
                             .update(from: src + (y - cy) * rowLength, count: rowLength)
                     }
                     if k == 0 {
-                        lock.lock(); color = lr.pointee.color; lock.unlock()
+                        let c = colorData(lr)
+                        lock.lock(); color = c; lock.unlock()
                     }
                 } catch {
                     lock.lock(); failure = error; lock.unlock()
@@ -129,11 +130,7 @@ public enum XTransDecoder {
 
         let (pixels, w, h) = applyFlip(sensor, width: sensorW, height: sensorH, flip: flip)
 
-        // After processing, pre_mul holds the multipliers actually applied, normalized so the
-        // smallest is 1 (with highlight clipping).
-        let wb = [color.pre_mul.0, color.pre_mul.1, color.pre_mul.2].map { $0 > 0 ? $0 : 1 }
-        let x = color.cam_xyz
-        let camXYZ = [x.0.0, x.0.1, x.0.2, x.1.0, x.1.1, x.1.2, x.2.0, x.2.1, x.2.2]
+        let (wb, camXYZ) = color
 
         let props = ImageLoading.properties(at: url)
         let exposure = Exposure(properties: props) ?? Exposure(
@@ -141,6 +138,23 @@ public enum XTransDecoder {
             date: other.timestamp > 0 ? Date(timeIntervalSince1970: TimeInterval(other.timestamp)) : nil)
         return XTransImage(width: w, height: h, pixels: pixels, wb: wb, camXYZ: camXYZ,
                            make: make, model: model, exposure: exposure, properties: props)
+    }
+
+    /// The white-balance multipliers and colour matrix of a processed frame, read through the
+    /// pointer: `libraw_colordata_t` is 187 KB, and copying it (`lr.pointee.color`) onto a
+    /// dispatch worker's 512 KB stack overflowed it on the iPhone.
+    private static func colorData(_ lr: UnsafeMutablePointer<libraw_data_t>) -> (wb: [Float], camXYZ: [Float]) {
+        let color = UnsafeRawPointer(lr).advanced(by: MemoryLayout<libraw_data_t>.offset(of: \.color)!)
+        func floats(_ field: PartialKeyPath<libraw_colordata_t>, _ count: Int) -> [Float] {
+            let p = color.advanced(by: MemoryLayout<libraw_colordata_t>.offset(of: field)!)
+                .assumingMemoryBound(to: Float.self)
+            return Array(UnsafeBufferPointer(start: p, count: count))
+        }
+        // After processing, pre_mul holds the multipliers actually applied, normalized so the
+        // smallest is 1 (with highlight clipping).
+        let wb = floats(\libraw_colordata_t.pre_mul, 3).map { $0 > 0 ? $0 : 1 }
+        // cam_xyz is [4][3]: the first three rows are R, G, B.
+        return (wb, floats(\libraw_colordata_t.cam_xyz, 9))
     }
 
     /// Four bands: a 4× speed-up on a Mac or the iPhone's cores, at a few hundred MB peak.

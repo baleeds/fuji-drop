@@ -68,8 +68,12 @@ public struct MergedImage: Sendable {
 ///    reference over mid-tones, since shutter speeds aren't exact.
 /// 2. Align with a Vision homography on half-size luminance; tripod shots (< 0.5 px) skip it.
 ///    Warping is bilinear, done while merging, so no warped copies are kept.
-/// 3. Weight: 1 below 80 % of clip falling to 0 at 95 % (max channel, dilated 2 px), times
-///    the light gathered (t / N²), so brighter frames win in the shadows.
+/// 3. Weight, anchored to the reference: midtones come from the reference alone (a moving
+///    subject is never blended from frames taken up to a second apart, which left skin
+///    blotchy). Brighter frames join only in the reference's deep shadows (6 → 8 stops below
+///    clip, by the light they gathered), darker frames only where the reference nears clip
+///    (its weight falls from 80 % to 95 % of clip, max channel, dilated 2 px). The shadow
+///    ramp follows the reference's 8× smaller luminance grid, so the zones have soft edges.
 /// 4. Deghost on an 8× smaller luminance grid (noise-robust, and its bilinear upsampling
 ///    smooths the masks): a frame more than ½ stop from the reference drops out; where the
 ///    reference is clipped, the shortest frame is the anchor instead.
@@ -81,6 +85,10 @@ public enum HDRMerger {
         public var saturationEnd: Float = 0.95
         /// A frame differing from the anchor by more than this (stops) is a ghost there.
         public var ghostStops: Float = 0.5
+        /// Brighter frames start to contribute this many stops below the reference's clip, and
+        /// carry their full weight from `shadowFull` down.
+        public var shadowStart: Float = 6
+        public var shadowFull: Float = 8
         /// Alignment shifts below this (full-resolution pixels) are ignored (tripod).
         public var minShift: Float = 0.5
         public var align = true
@@ -168,6 +176,7 @@ public enum HDRMerger {
         // 4. Ghost masks on the grid.
         let darkest = exposures.indices.min { gain[$0] < gain[$1] }!
         let ghosts = ghostMasks(warpedGrids, reference: reference, darkest: darkest, gain: gain, options: options)
+        let shadows = shadowWeights(grids[reference], options: options)
 
         // Pixels every frame covers.
         let crop = coverage(warps, width: w, height: h)
@@ -180,7 +189,8 @@ public enum HDRMerger {
             let out = SendableBox(out)
             DispatchQueue.concurrentPerform(iterations: strips) { s in
                 mergeStrip(rows: s * strip..<min(h, (s + 1) * strip), frames: frames, warps: warps,
-                           gain: gain, photonWeight: photonWeight, ghosts: ghosts, darkest: darkest,
+                           gain: gain, photonWeight: photonWeight, ghosts: ghosts, shadows: shadows,
+                           reference: reference, darkest: darkest,
                            options: options, out: out.value)
             }
         }
@@ -219,7 +229,8 @@ public enum HDRMerger {
 
     /// Merges `rows` into `out`.
     private static func mergeStrip(rows: Range<Int>, frames: [XTransImage], warps: [simd_float3x3?],
-                                   gain: [Float], photonWeight: [Float], ghosts: [GhostMask?], darkest: Int,
+                                   gain: [Float], photonWeight: [Float], ghosts: [GridWeights?], shadows: GridWeights,
+                                   reference: Int, darkest: Int,
                                    options: Options, out: UnsafeMutableBufferPointer<Float16>) {
         let w = frames[0].width, h = frames[0].height
         let margin = 2
@@ -261,6 +272,8 @@ public enum HDRMerger {
         }
 
         let span = options.saturationEnd - options.saturationStart
+        /// 1 below `saturationStart` of clip, falling to 0 at `saturationEnd`.
+        func unclipped(_ m: Float) -> Float { min(max((options.saturationEnd - m) / span, 0), 1) }
         values.withUnsafeBufferPointer { values in
             sat.withUnsafeBufferPointer { sat in
                 inside.withUnsafeBufferPointer { inside in
@@ -272,8 +285,14 @@ public enum HDRMerger {
                         for x in 0..<w {
                             let o = (y - top) * w + x
                             var sum = SIMD3<Float>(repeating: 0), total: Float = 0
+                            let refWeight = unclipped(sat[reference * n + o])
                             for k in frames.indices where inside[k * n + o] {
-                                var weight = photonWeight[k] * min(max((options.saturationEnd - sat[k * n + o]) / span, 0), 1)
+                                var weight = unclipped(sat[k * n + o])
+                                if k != reference {
+                                    weight *= gain[k] > gain[reference]
+                                        ? photonWeight[k] / photonWeight[reference] * shadows.value(x: x, y: y)
+                                        : 1 - refWeight
+                                }
                                 if weight > 0, let ghost = ghosts[k] { weight *= ghost.value(x: x, y: y) }
                                 guard weight > 0 else { continue }
                                 sum += weight * value(k, o)
@@ -413,8 +432,8 @@ public enum HDRMerger {
         }
     }
 
-    /// Per-frame weights on the grid (1 keep, 0 ghost), upsampled bilinearly when read.
-    struct GhostMask {
+    /// Weights on the 8× smaller grid (ghost masks, shadow zones), upsampled bilinearly when read.
+    struct GridWeights {
         let gw: Int, gh: Int
         let weights: [Float]
 
@@ -431,11 +450,21 @@ public enum HDRMerger {
         }
     }
 
+    /// Where brighter frames may contribute: 1 in the reference's deep shadows (`shadowFull`
+    /// stops or more below clip), 0 from `shadowStart` stops up, a log ramp between.
+    static func shadowWeights(_ r: LowRes, options: Options) -> GridWeights {
+        let weights = r.lum.map { l -> Float in
+            let below = -log2(max(l, 1e-6)) // stops below clip
+            return min(max((below - options.shadowStart) / (options.shadowFull - options.shadowStart), 0), 1)
+        }
+        return GridWeights(gw: r.gw, gh: r.gh, weights: weights)
+    }
+
     static func ghostMasks(_ grids: [LowRes], reference: Int, darkest: Int, gain: [Float],
-                           options: Options) -> [GhostMask?] {
+                           options: Options) -> [GridWeights?] {
         let r = grids[reference]
         let floor: Float = 0.003
-        return grids.indices.map { k -> GhostMask? in
+        return grids.indices.map { k -> GridWeights? in
             guard k != reference else { return nil }
             let g = grids[k]
             var keep = [Float](repeating: 1, count: r.lum.count)
@@ -470,7 +499,7 @@ public enum HDRMerger {
                     }
                 }
             }
-            return GhostMask(gw: r.gw, gh: r.gh, weights: grown)
+            return GridWeights(gw: r.gw, gh: r.gh, weights: grown)
         }
     }
 
