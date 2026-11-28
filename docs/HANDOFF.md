@@ -10,7 +10,7 @@ groups them into moments, suggests the best frame, lets the owner compare and pi
 picks to Apple Photos as RAW+JPEG. Background: [leverage-research.md](leverage-research.md).
 Measured results: [spike-findings.md](spike-findings.md). Read both first.
 
-Branch: `claude/optimistic-meitner-15tlsd`. Commit and push there.
+Branch: `main` (the trunk since Nov 27, 2026; it replaced `claude/optimistic-meitner-15tlsd`). Commit and push there.
 
 ## Owner's preferences
 
